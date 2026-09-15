@@ -3,8 +3,9 @@
  * { "YYYY-MM-DD": { "provider:账号名": {used, quota, used0} } }，输出各种视图形状。
  * 与展示组件严格分离——方便单测，也方便灌 mock 数据验证视觉效果。
  *
- * 关键口径（与后端 balance_server.py:4066-4092 对齐）：
- * - 余额 = quota - used（美元）
+ * 关键口径（与后端对齐；new-api 的 /api/user/self 里 quota 就是剩余额度，站点控制台
+ * 显示的「余额」= quota / quota_per_unit，used_quota 是独立的已用统计）：
+ * - 余额 = quota（美元）
  * - 余额按站点分区分成「公益 / 付费」两桶（tierOf 给出 provider → 分区，见 shared/lib/site-tier.ts）
  * - 每日消耗 = used - used0（当天基线）
  * - 签到收益：后端没有持久化签到历史（checkin_state.date 每轮覆盖），从 quota 的
@@ -83,9 +84,8 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
     let spend = 0;
     const byTier: Record<SiteTier, number> = { public: 0, paid: 0 };
     for (const [key, entry] of Object.entries(day)) {
-      const accountBalance = entry.quota - entry.used;
-      balance += accountBalance;
-      byTier[tierOf(providerOfKey(key))] += accountBalance;
+      balance += entry.quota;
+      byTier[tierOf(providerOfKey(key))] += entry.quota;
       spend += Math.max(0, entry.used - entry.used0);
     }
     // gain 先置 0：精确的逐日签到收益在下面用 computeDailyGains 回填
@@ -132,7 +132,7 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
     }
 
     const last = lastDay[key]!;
-    const balance = round2(last.quota - last.used);
+    const balance = round2(last.quota);
     const last7 = spends.slice(-7);
     const last30 = spends.slice(-30);
     const burn7 = last7.length > 0 ? last7.reduce((a, b) => a + b, 0) / last7.length : 0;

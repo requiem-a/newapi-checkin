@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { EmptyState, ErrorState, LoadingState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
 import { apiPost } from "@/shared/api/client";
@@ -26,7 +27,9 @@ export function SitesPage() {
   const sites = sitesQ.data ?? [];
 
   const countsQ = useQuery({
-    queryKey: ["accounts", "site-accounts", sites.map((s) => s.id)] as const,
+    // 只取各站点账号数量；不能与 accounts-page/keys-page 共用 "site-accounts" 键，
+    // 否则数字会覆盖缓存里的数组，账号页渲染 (1 ?? []).entries() 时崩溃
+    queryKey: ["accounts", "site-account-counts", sites.map((s) => s.id)] as const,
     queryFn: async () => {
       const entries = await Promise.all(sites.map(async (s) => [s.id, (await fetchSiteAccounts(s.id)).length] as const));
       return Object.fromEntries(entries) as Record<string, number>;
@@ -123,6 +126,20 @@ export function SitesPage() {
     }
   }
 
+  /** 切代理开关。同样是整表回写；后端连接池缓存键带代理模式，改完立刻生效、不用重启 */
+  async function onToggleProxy(site: NewapiSite, useProxy: boolean) {
+    setSavingTier(site.id);
+    try {
+      await apiPost<SitesResponse>("/sites", { sites: sites.map((s) => (s.id === site.id ? { ...s, use_proxy: useProxy } : s)) });
+      await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      toast.success(useProxy ? `${site.label} 已改为走本地代理` : `${site.label} 已改为直连`);
+    } catch (err) {
+      toast.error(errorMessage(err, "保存失败"));
+    } finally {
+      setSavingTier(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <PageHeader title="站点管理" description="接入任意 new-api 同构站点，按公益 / 付费分区统计额度" />
@@ -141,7 +158,7 @@ export function SitesPage() {
           </div>
           <div className="space-y-1">
             <Label htmlFor="site-domain" className="text-xs">域名</Label>
-            <Input id="site-domain" value={newDomain} onChange={(e) => setNewDomain(e.target.value)} className="h-8 font-data text-xs" placeholder="https://gorouter.app" />
+            <Input id="site-domain" value={newDomain} onChange={(e) => setNewDomain(e.target.value)} className="h-8 font-data text-xs" placeholder="kktoken.cc 或 https://gorouter.app" />
           </div>
           <div className="space-y-1">
             <Label htmlFor="site-tier" className="text-xs">分区</Label>
@@ -217,6 +234,7 @@ export function SitesPage() {
                       index={i}
                       saving={savingTier === site.id}
                       onTierChange={(next) => void onTierChange(site, next)}
+                      onToggleProxy={(useProxy) => void onToggleProxy(site, useProxy)}
                       onDelete={() => void onDelete(site)}
                     />
                   ))}
@@ -236,6 +254,7 @@ function SiteCard({
   index,
   saving,
   onTierChange,
+  onToggleProxy,
   onDelete,
 }: {
   site: NewapiSite;
@@ -243,6 +262,7 @@ function SiteCard({
   index: number;
   saving: boolean;
   onTierChange: (tier: SiteTier) => void;
+  onToggleProxy: (useProxy: boolean) => void;
   onDelete: () => void;
 }) {
   const turnstileQ = useQuery({
@@ -286,7 +306,13 @@ function SiteCard({
         ) : null}
         <Badge variant="outline" className="text-[11px] text-muted-foreground">${site.quota_per_unit}/配额单位</Badge>
       </div>
-      <div className="mt-3 flex items-center justify-between gap-2 border-t pt-3">
+      <label className="mt-3 flex cursor-pointer items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 hover:bg-muted/50">
+        <span className="text-xs text-muted-foreground" title="开启后经本地代理（HTTPS_PROXY，默认 127.0.0.1:7890）访问该站点；直连被 Cloudflare 拦 403 的站点应保持开启">
+          走本地代理
+        </span>
+        <Switch checked={site.use_proxy ?? true} onCheckedChange={onToggleProxy} disabled={saving} aria-label={`${site.label} 走本地代理`} />
+      </label>
+      <div className="mt-2 flex items-center justify-between gap-2 border-t pt-2">
         <p className="min-w-0 truncate text-[11px] text-muted-foreground">签到路径 <span className="font-data">{site.sign_in_path || "/api/user/checkin"}</span></p>
         <div className="flex shrink-0 items-center gap-1.5">
           {saving ? <Loader2 className="size-3 animate-spin text-muted-foreground" aria-hidden="true" /> : null}
