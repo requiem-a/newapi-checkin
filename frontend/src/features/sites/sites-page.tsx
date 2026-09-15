@@ -84,7 +84,9 @@ export function SitesPage() {
     }
     setAdding(true);
     try {
-      const input = { id: newId.trim(), label: newLabel.trim(), domain: newDomain.trim().replace(/^https?:\/\//, ""), tier: newTier };
+      // 原样提交用户输入：后端对不带 scheme 的裸域名补 https://，
+      // 这里若先把 scheme 剥掉，会把用户显式写的 http:// 也强行变成 https://
+      const input = { id: newId.trim(), label: newLabel.trim(), domain: newDomain.trim(), tier: newTier };
       await apiPost<SitesResponse>("/sites", { sites: [...sites, input] });
       await queryClient.invalidateQueries({ queryKey: ["accounts"] });
       toast.success(`已接入 ${input.label}（${TIER_SITE_LABEL[newTier]}），去「账号管理」添加它的账号`);
