@@ -7,12 +7,15 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyState, ErrorState, LoadingState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
 import { apiPost } from "@/shared/api/client";
 import { getSiteTurnstile } from "@/features/checkin/checkin-api";
 import { siteDotClass } from "@/shared/lib/site-color";
-import type { NewapiSite, SiteProbeResponse, SitesResponse } from "@/types";
+import { SITE_TIERS, TIER_DESCRIPTION, TIER_SITE_LABEL, tierDotClass, tierTextClass } from "@/shared/lib/site-tier";
+import { cn } from "@/shared/lib/cn";
+import type { NewapiSite, SiteProbeResponse, SiteTier, SitesResponse } from "@/types";
 
 import { fetchSiteAccounts, fetchSites } from "@/features/accounts/accounts-api";
 import { errorMessage } from "@/features/checkin/checkin-format";
@@ -34,9 +37,11 @@ export function SitesPage() {
   const [newId, setNewId] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newDomain, setNewDomain] = useState("");
+  const [newTier, setNewTier] = useState<SiteTier>("public");
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<{ domain: string; ok: boolean; system_name: string; version: string; checkin_enabled: boolean; turnstile_check: boolean; quota_per_unit: number } | null>(null);
   const [adding, setAdding] = useState(false);
+  const [savingTier, setSavingTier] = useState<string | null>(null);
 
   if (sitesQ.isError) return <ErrorState message={errorMessage(sitesQ.error, "站点列表加载失败")} onRetry={() => void sitesQ.refetch()} />;
 
@@ -76,13 +81,14 @@ export function SitesPage() {
     }
     setAdding(true);
     try {
-      const input = { id: newId.trim(), label: newLabel.trim(), domain: newDomain.trim().replace(/^https?:\/\//, "") };
+      const input = { id: newId.trim(), label: newLabel.trim(), domain: newDomain.trim().replace(/^https?:\/\//, ""), tier: newTier };
       await apiPost<SitesResponse>("/sites", { sites: [...sites, input] });
-      await queryClient.invalidateQueries({ queryKey: ["accounts", "sites"] });
-      toast.success(`已接入 ${input.label}，去「账号管理」添加它的账号`);
+      await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      toast.success(`已接入 ${input.label}（${TIER_SITE_LABEL[newTier]}），去「账号管理」添加它的账号`);
       setNewId("");
       setNewLabel("");
       setNewDomain("");
+      setNewTier("public");
       setProbeResult(null);
     } catch (err) {
       toast.error(errorMessage(err, "添加失败"));
@@ -102,14 +108,29 @@ export function SitesPage() {
     }
   }
 
+  /** 改分区。POST /api/sites 是整表替换，所以要把改完的完整清单回写（分区只影响统计口径，不动账号数据） */
+  async function onTierChange(site: NewapiSite, tier: SiteTier) {
+    if (site.tier === tier) return;
+    setSavingTier(site.id);
+    try {
+      await apiPost<SitesResponse>("/sites", { sites: sites.map((s) => (s.id === site.id ? { ...s, tier } : s)) });
+      await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      toast.success(`${site.label} 已归入${TIER_SITE_LABEL[tier]}`);
+    } catch (err) {
+      toast.error(errorMessage(err, "切换分区失败"));
+    } finally {
+      setSavingTier(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      <PageHeader title="站点管理" description="接入任意 new-api 同构站点" />
+      <PageHeader title="站点管理" description="接入任意 new-api 同构站点，按公益 / 付费分区统计额度" />
 
       <section className="rounded-lg bg-card p-4 sm:p-5">
         <h2 className="text-sm font-medium">接入新站点</h2>
         <p className="mt-1 text-xs text-muted-foreground">填个域名即可接入，后端零改动；建议先「探测一下」确认是 new-api 站点</p>
-        <form className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_1.4fr_auto]" onSubmit={onAdd}>
+        <form className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-[1fr_1fr_1.4fr_auto_auto]" onSubmit={onAdd}>
           <div className="space-y-1">
             <Label htmlFor="site-id" className="text-xs">站点 ID（唯一，创建后勿改）</Label>
             <Input id="site-id" value={newId} onChange={(e) => setNewId(e.target.value)} className="h-8 font-data text-xs" placeholder="gorouter" />
@@ -121,6 +142,19 @@ export function SitesPage() {
           <div className="space-y-1">
             <Label htmlFor="site-domain" className="text-xs">域名</Label>
             <Input id="site-domain" value={newDomain} onChange={(e) => setNewDomain(e.target.value)} className="h-8 font-data text-xs" placeholder="https://gorouter.app" />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="site-tier" className="text-xs">分区</Label>
+            <Select value={newTier} onValueChange={(v) => setNewTier(v as SiteTier)}>
+              <SelectTrigger id="site-tier" className="w-full xl:w-28" aria-label="新站点分区">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SITE_TIERS.map((tier) => (
+                  <SelectItem key={tier} value={tier} className="text-xs">{TIER_SITE_LABEL[tier]}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="flex items-end gap-2">
             <Button type="button" variant="secondary" onClick={() => void onProbe()} disabled={probing}>
@@ -154,17 +188,63 @@ export function SitesPage() {
       {sites.length === 0 && !sitesQ.isLoading ? (
         <EmptyState message="还没有接入任何 new-api 站点——用上面的表单加一个" />
       ) : (
-        <div className="grid gap-2 sm:grid-cols-2">
-          {sites.map((site, i) => (
-            <SiteCard key={site.id} site={site} count={countsQ.data?.[site.id] ?? 0} index={i} onDelete={() => void onDelete(site)} />
-          ))}
-        </div>
+        SITE_TIERS.map((tier) => {
+          const group = sites.filter((s) => s.tier === tier);
+          const accountCount = group.reduce((sum, s) => sum + (countsQ.data?.[s.id] ?? 0), 0);
+          return (
+            <section key={tier} className="space-y-2">
+              <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <h2 className={cn("flex items-center gap-1.5 text-sm font-medium", tierTextClass(tier))}>
+                  <span className={tierDotClass(tier)} aria-hidden="true" />
+                  {TIER_SITE_LABEL[tier]}
+                </h2>
+                <span className="font-data text-xs text-muted-foreground">
+                  {group.length} 个站点 · {accountCount} 个账号
+                </span>
+                <p className="w-full text-xs text-muted-foreground">{TIER_DESCRIPTION[tier]}</p>
+              </header>
+              {group.length === 0 ? (
+                <p className="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">
+                  还没有{TIER_SITE_LABEL[tier]}——加站点时把「分区」选成{TIER_SITE_LABEL[tier]}，或直接改已有站点卡片底部的分区
+                </p>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {group.map((site, i) => (
+                    <SiteCard
+                      key={site.id}
+                      site={site}
+                      count={countsQ.data?.[site.id] ?? 0}
+                      index={i}
+                      saving={savingTier === site.id}
+                      onTierChange={(next) => void onTierChange(site, next)}
+                      onDelete={() => void onDelete(site)}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          );
+        })
       )}
     </div>
   );
 }
 
-function SiteCard({ site, count, index, onDelete }: { site: NewapiSite; count: number; index: number; onDelete: () => void }) {
+function SiteCard({
+  site,
+  count,
+  index,
+  saving,
+  onTierChange,
+  onDelete,
+}: {
+  site: NewapiSite;
+  count: number;
+  index: number;
+  saving: boolean;
+  onTierChange: (tier: SiteTier) => void;
+  onDelete: () => void;
+}) {
   const turnstileQ = useQuery({
     queryKey: ["checkin", "site-turnstile", site.id],
     queryFn: () => getSiteTurnstile(site.id),
@@ -206,7 +286,22 @@ function SiteCard({ site, count, index, onDelete }: { site: NewapiSite; count: n
         ) : null}
         <Badge variant="outline" className="text-[11px] text-muted-foreground">${site.quota_per_unit}/配额单位</Badge>
       </div>
-      <p className="mt-2 text-[11px] text-muted-foreground">签到路径 <span className="font-data">{site.sign_in_path || "/api/user/checkin"}</span></p>
+      <div className="mt-3 flex items-center justify-between gap-2 border-t pt-3">
+        <p className="min-w-0 truncate text-[11px] text-muted-foreground">签到路径 <span className="font-data">{site.sign_in_path || "/api/user/checkin"}</span></p>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {saving ? <Loader2 className="size-3 animate-spin text-muted-foreground" aria-hidden="true" /> : null}
+          <Select value={site.tier} onValueChange={(v) => onTierChange(v as SiteTier)} disabled={saving}>
+            <SelectTrigger className="h-7 w-24 text-[11px]" aria-label={`${site.label} 的分区`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SITE_TIERS.map((tier) => (
+                <SelectItem key={tier} value={tier} className="text-xs">{TIER_SITE_LABEL[tier]}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
     </section>
   );
 }

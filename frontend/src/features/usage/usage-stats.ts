@@ -5,17 +5,23 @@
  *
  * 关键口径（与后端 balance_server.py:4066-4092 对齐）：
  * - 余额 = quota - used（美元）
+ * - 余额按站点分区分成「公益 / 付费」两桶（tierOf 给出 provider → 分区，见 shared/lib/site-tier.ts）
  * - 每日消耗 = used - used0（当天基线）
  * - 签到收益：后端没有持久化签到历史（checkin_state.date 每轮覆盖），从 quota 的
  *   日增量反推——某天 quota 比前一天高 = 那天签到成功。这是近似值，UI 必须标注。
  */
 
-import type { UsageHistory, UsageDayMap } from "@/types";
+import type { SiteTier, UsageHistory, UsageDayMap } from "@/types";
+import { defaultTierOf, type TierOf } from "@/shared/lib/site-tier";
 
 export interface DayPoint {
   date: string;
-  /** 全账号余额合计 */
+  /** 全账号余额合计 = balancePublic + balancePaid */
   balance: number;
+  /** 公益站余额合计 */
+  balancePublic: number;
+  /** 付费站余额合计 */
+  balancePaid: number;
   /** 全账号当日消耗合计 */
   spend: number;
   /** 全账号签到收益合计（quota 日增量） */
@@ -27,6 +33,8 @@ export interface AccountStat {
   key: string;
   provider: string;
   name: string;
+  /** 账号所属分区：公益 / 付费 */
+  tier: SiteTier;
   balance: number;
   /** 窗口期内总消耗 */
   spend: number;
@@ -42,16 +50,27 @@ export interface AccountStat {
   signedDays: Set<string>;
 }
 
+export interface ProviderStat {
+  provider: string;
+  tier: SiteTier;
+  balance: number;
+}
+
 export interface UsageStats {
   days: DayPoint[];
   accounts: AccountStat[];
-  providers: { provider: string; balance: number }[];
+  providers: ProviderStat[];
   dateRange: [string, string] | null;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-export function computeUsageStats(history: UsageHistory, lowBalanceThreshold = 10): UsageStats {
+/** 从 usage key 取 provider。站点 id 不含冒号，账号名可含，所以只切第一段。 */
+function providerOfKey(key: string): string {
+  return key.split(":")[0]!;
+}
+
+export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaultTierOf): UsageStats {
   const dates = Object.keys(history.history).sort();
   if (dates.length === 0) {
     return { days: [], accounts: [], providers: [], dateRange: null };
@@ -62,13 +81,23 @@ export function computeUsageStats(history: UsageHistory, lowBalanceThreshold = 1
     const day = history.history[date]!;
     let balance = 0;
     let spend = 0;
-    for (const entry of Object.values(day)) {
-      balance += entry.quota - entry.used;
+    const byTier: Record<SiteTier, number> = { public: 0, paid: 0 };
+    for (const [key, entry] of Object.entries(day)) {
+      const accountBalance = entry.quota - entry.used;
+      balance += accountBalance;
+      byTier[tierOf(providerOfKey(key))] += accountBalance;
       spend += Math.max(0, entry.used - entry.used0);
     }
     // gain 先置 0：精确的逐日签到收益在下面用 computeDailyGains 回填
     // （按天聚合时拿不到前一日的 quota，在这里算不出增量）
-    return { date, balance: round2(balance), spend: round2(spend), gain: 0 };
+    return {
+      date,
+      balance: round2(balance),
+      balancePublic: round2(byTier.public),
+      balancePaid: round2(byTier.paid),
+      spend: round2(spend),
+      gain: 0,
+    };
   });
 
   // ── 按账号聚合 ──
@@ -111,8 +140,9 @@ export function computeUsageStats(history: UsageHistory, lowBalanceThreshold = 1
 
     accountStats.push({
       key,
-      provider,
+      provider: provider!,
       name,
+      tier: tierOf(provider!),
       balance,
       spend: round2(spend),
       burnRate7: round2(burn7),
@@ -122,19 +152,18 @@ export function computeUsageStats(history: UsageHistory, lowBalanceThreshold = 1
       signedDays,
     });
 
-    providerTotals.set(provider, (providerTotals.get(provider) ?? 0) + balance);
+    providerTotals.set(provider!, (providerTotals.get(provider!) ?? 0) + balance);
   }
 
   // 签到收益回填到天数序列（按天聚合时拿不到前一日的 quota，这里单独算精确日增量）
   const gainsByDay = computeDailyGains(history.history, dates);
   for (const point of days) point.gain = gainsByDay.get(point.date) ?? 0;
 
-  void lowBalanceThreshold;
   return {
     days,
     accounts: accountStats.sort((a, b) => b.spend - a.spend),
     providers: [...providerTotals.entries()]
-      .map(([provider, balance]) => ({ provider, balance: round2(balance) }))
+      .map(([provider, balance]) => ({ provider, tier: tierOf(provider), balance: round2(balance) }))
       .sort((a, b) => b.balance - a.balance),
     dateRange: [dates[0]!, dates[dates.length - 1]!],
   };

@@ -81,6 +81,36 @@ def test_按id查站点(sandbox):
 	assert bs.get_newapi_site('nope') is None
 
 
+# ===== 站点分区（公益 / 付费） =====
+
+
+def test_未标注分区默认公益(sandbox):
+	"""老 newapi_sites.json 里没有 tier 字段，升级后必须落到公益而不是加载失败。"""
+	write_sites(sandbox, [{'id': 'a', 'label': 'A', 'domain': 'https://a.com'}])
+	assert bs.get_newapi_site('a').tier == 'public'
+
+
+def test_付费分区能落盘并在重启后读回(sandbox):
+	s = site(id='paid-site', tier='paid')
+	bs.save_newapi_sites([s])
+	assert json.loads((sandbox / 'newapi_sites.json').read_text(encoding='utf-8'))[0]['tier'] == 'paid', '分区要写进注册表，否则重启就丢'
+	assert bs.get_newapi_site('paid-site').tier == 'paid'
+
+
+def test_非法分区值被拒绝(sandbox):
+	"""分区只有 public/paid 两种，别让手改 JSON 写进一个前端不认识的值。"""
+	with pytest.raises(Exception):
+		site(id='a', tier='freebie')
+
+
+def test_种子站点都标了公益():
+	"""种子里的都是公益站；付费站由用户自己在站点管理里加。
+
+	不能用 sandbox 夹具：它会把 NEWAPI_SEED_SITES 清成 []。这里只读模块常量，不碰文件。
+	"""
+	assert {s.get('tier') for s in bs.NEWAPI_SEED_SITES} == {'public'}
+
+
 # ===== 账号按站点隔离 =====
 
 

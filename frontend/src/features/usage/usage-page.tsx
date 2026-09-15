@@ -12,11 +12,13 @@ import { KpiSkeleton, Skeleton } from "@/shared/components/skeleton";
 import { PageHeader } from "@/shared/components/page-header";
 import { apiGet } from "@/shared/api/client";
 import { siteDotClass } from "@/shared/lib/site-color";
+import { TIER_LABEL, tierTextClass } from "@/shared/lib/site-tier";
 import { cn } from "@/shared/lib/cn";
 import type { UsageHistory } from "@/types";
 
 import { UsageTrend } from "@/features/usage/usage-trend";
 import { computeUsageStats, healthLabel, healthTextClass, healthLevel, periodOverPeriod } from "@/features/usage/usage-stats";
+import { useTierOf } from "@/features/sites/use-tier-of";
 import { errorMessage } from "@/features/checkin/checkin-format";
 
 /** 站点色相与 index.css 的 --site-0..5 对齐（图表 fill 需要字面量颜色，吃不到 CSS class） */
@@ -64,8 +66,9 @@ export function UsagePage() {
     queryKey: ["usage", "history"],
     queryFn: () => apiGet<UsageHistory>("/usage/history"),
   });
+  const tierOf = useTierOf();
 
-  const stats = useMemo(() => (historyQ.data ? computeUsageStats(historyQ.data) : null), [historyQ.data]);
+  const stats = useMemo(() => (historyQ.data ? computeUsageStats(historyQ.data, tierOf) : null), [historyQ.data, tierOf]);
   const windowDays = Number(period);
 
   const visibleDays = useMemo(() => (stats ? stats.days.slice(-windowDays) : []), [stats, windowDays]);
@@ -159,9 +162,10 @@ export function UsagePage() {
             <div className="mt-3 space-y-1.5">
               {stats?.providers.map((p) => (
                 <div key={p.provider} className="flex items-center justify-between text-xs">
-                  <span className="flex items-center gap-1.5">
+                  <span className="flex min-w-0 items-center gap-1.5">
                     <span className={siteDotClass(p.provider)} aria-hidden="true" />
-                    {p.provider}
+                    <span className="truncate">{p.provider}</span>
+                    <span className={cn("shrink-0 text-[10px]", tierTextClass(p.tier))}>{TIER_LABEL[p.tier]}</span>
                   </span>
                   <span className="font-data tabular-nums">{money(p.balance)}</span>
                 </div>
@@ -193,6 +197,7 @@ export function UsagePage() {
                         <span className="flex items-center gap-1.5 text-xs">
                           <span className={siteDotClass(a.provider)} aria-hidden="true" />
                           {a.name}
+                          <span className={cn("text-[10px]", tierTextClass(a.tier))}>{TIER_LABEL[a.tier]}</span>
                         </span>
                       </TableCell>
                       <TableCell className={cn("text-right font-data text-xs", a.balance < 10 && "text-balance-low")}>{money(a.balance)}</TableCell>

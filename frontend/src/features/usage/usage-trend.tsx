@@ -9,14 +9,28 @@ import { EmptyState } from "@/shared/components/data-state";
 import { cn } from "@/shared/lib/cn";
 
 /**
- * 三合一趋势图：余额（Area）+ 每日消耗+ 签到收益（Line 虚线）。
+ * 趋势图：余额（公益 / 付费两条 Area）+ 每日消耗（Bar）+ 签到收益（Line 虚线）。
  * 结构照搬 grok2api 的 dashboard-trend.tsx（图例可点击隐藏系列、双 Y 轴随可见系列
  * 自动重排、自定义 tooltip），只换了数据源与系列含义。
+ *
+ * 公益与付费是**两条独立曲线**，不是堆叠：堆叠后上面那条的读数会变成「公益+付费」，
+ * 而这两条曲线存在的意义恰恰是各自读一条——"公益还剩多少"与"付费还剩多少"。
+ * 两条共用左侧同一个余额轴，所以高度可以直接互相比较。
  */
-type TrendSeries = "balance" | "spend" | "gain";
+type TrendSeries = "balancePublic" | "balancePaid" | "spend" | "gain";
+type AxisId = "balance" | "spend" | "gain";
 type AxisSide = "left" | "right";
 
-const TREND_SERIES: TrendSeries[] = ["balance", "spend", "gain"];
+const BALANCE_SERIES = ["balancePublic", "balancePaid"] as const satisfies readonly TrendSeries[];
+const TREND_SERIES: readonly TrendSeries[] = [...BALANCE_SERIES, "spend", "gain"];
+
+/** 每个系列画在哪个轴上：两条余额曲线共用一个轴，才能直接比高低 */
+const AXIS_OF: Record<TrendSeries, AxisId> = {
+  balancePublic: "balance",
+  balancePaid: "balance",
+  spend: "spend",
+  gain: "gain",
+};
 
 const money = (v: number) => `$${v.toFixed(2)}`;
 
@@ -28,9 +42,11 @@ export function UsageTrend({ days, loading, title = "余额与消耗趋势" }: {
     [days],
   );
 
+  // 颜色统一走 index.css 的 --tier-public / --tier-paid，两处不各写一份 oklch
   const chartConfig = useMemo<ChartConfig>(
     () => ({
-      balance: { label: "总余额", theme: { light: "oklch(0.68 0.15 245)", dark: "oklch(0.74 0.13 245)" } },
+      balancePublic: { label: "公益余额", color: "var(--tier-public)" },
+      balancePaid: { label: "付费余额", color: "var(--tier-paid)" },
       spend: { label: "每日消耗", theme: { light: "oklch(0.7 0.11 160)", dark: "oklch(0.73 0.1 160)" } },
       gain: { label: "签到收益", theme: { light: "oklch(0.76 0.12 80)", dark: "oklch(0.8 0.13 80)" } },
     }),
@@ -59,12 +75,6 @@ export function UsageTrend({ days, loading, title = "余额与消耗趋势" }: {
         <div className="relative" aria-busy={loading}>
           <ChartContainer config={chartConfig} className={cn("h-[280px] w-full aspect-auto", loading && "opacity-40")}>
             <ComposedChart accessibilityLayer data={chartData} margin={{ left: 0, right: 4, top: 10, bottom: 0 }}>
-              <defs>
-                <linearGradient id="usage-balance-fill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--color-balance)" stopOpacity={0.2} />
-                  <stop offset="95%" stopColor="var(--color-balance)" stopOpacity={0.01} />
-                </linearGradient>
-              </defs>
               <CartesianGrid vertical={false} strokeDasharray="3 3" />
               <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={10} minTickGap={20} />
               <YAxis
@@ -134,14 +144,29 @@ export function UsageTrend({ days, loading, title = "余额与消耗趋势" }: {
               />
               <Area
                 yAxisId="balance"
-                dataKey="balance"
+                dataKey="balancePublic"
                 type="monotone"
-                stroke="var(--color-balance)"
-                strokeWidth={1.5}
-                fill="url(#usage-balance-fill)"
-                hide={hiddenSeries.has("balance")}
+                stroke="var(--color-balancePublic)"
+                strokeWidth={1.75}
+                fill="var(--color-balancePublic)"
+                fillOpacity={0.12}
+                hide={hiddenSeries.has("balancePublic")}
                 dot={false}
-                activeDot={{ r: 3, fill: "var(--color-balance)", stroke: "var(--color-background)", strokeWidth: 2 }}
+                activeDot={{ r: 3, fill: "var(--color-balancePublic)", stroke: "var(--color-background)", strokeWidth: 2 }}
+                animationDuration={400}
+                animationEasing="ease-out"
+              />
+              <Area
+                yAxisId="balance"
+                dataKey="balancePaid"
+                type="monotone"
+                stroke="var(--color-balancePaid)"
+                strokeWidth={1.75}
+                fill="var(--color-balancePaid)"
+                fillOpacity={0.12}
+                hide={hiddenSeries.has("balancePaid")}
+                dot={false}
+                activeDot={{ r: 3, fill: "var(--color-balancePaid)", stroke: "var(--color-background)", strokeWidth: 2 }}
                 animationDuration={400}
                 animationEasing="ease-out"
               />
@@ -199,14 +224,25 @@ function TrendLegend({ config, hiddenSeries, onToggle }: { config: ChartConfig; 
   );
 }
 
-function resolveAxes(hiddenSeries: ReadonlySet<TrendSeries>): Partial<Record<TrendSeries, AxisSide>> {
-  const visible = TREND_SERIES.filter((series) => !hiddenSeries.has(series));
-  if (visible.length === 3) return { balance: "left", spend: "right" };
-  if (visible.length === 2) {
-    if (visible.includes("balance")) {
-      return { balance: "left", [visible.includes("spend") ? "spend" : "gain"]: "right" };
-    }
-    return { gain: "left", spend: "right" };
+/**
+ * 哪几个轴要显示、放哪一侧。规则：余额轴永远在左，消耗/收益挤右侧；
+ * 余额整个被隐藏时让剩下的那个补到左边，避免左侧空出一整条。
+ */
+function resolveAxes(hiddenSeries: ReadonlySet<TrendSeries>): Record<AxisId, AxisSide | null> {
+  const visibleAxes = new Set(TREND_SERIES.filter((s) => !hiddenSeries.has(s)).map((s) => AXIS_OF[s]));
+  const sides: Record<AxisId, AxisSide | null> = { balance: null, spend: null, gain: null };
+  if (visibleAxes.has("balance")) {
+    sides.balance = "left";
+    if (visibleAxes.has("spend")) sides.spend = "right";
+    if (visibleAxes.has("gain")) sides.gain = "right";
+    return sides;
   }
-  return visible.length === 1 ? { [visible[0]!]: "left" } : {};
+  if (visibleAxes.has("spend") && visibleAxes.has("gain")) {
+    sides.spend = "left";
+    sides.gain = "right";
+    return sides;
+  }
+  if (visibleAxes.has("spend")) sides.spend = "left";
+  if (visibleAxes.has("gain")) sides.gain = "left";
+  return sides;
 }

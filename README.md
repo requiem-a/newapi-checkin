@@ -9,9 +9,10 @@
 - **余额查询**：批量并发查询各站点账号余额与已用量，Chrome TLS 指纹（curl_cffi）访问
 - **每日签到**：定时快照、自动签到、签到状态面板；对开启了 Turnstile 的站点提供浏览器脚本签到
 - **用量记录**：每日 0 点快照写入 `daily_usage.json`，保留 90 天，前端展示今日用量与历史
+- **站点分区**：每个站点标成公益站或付费站，总览按分区出两条余额曲线、两张余额卡——公益站的额度没了不心疼，付费站的额度要盯紧
 - **API 密钥管理**：列出 / 新建 / 删除各账号的 API Key（new-api「令牌」），完整密钥展示与批量复制，结果落缓存
 - **监控告警**：可配置间隔检查余额，低于阈值 SMTP 邮件告警（去重）
-- **站点管理**：跑 new-api 的站点在 Web UI 填个域名即可接入，后端零改动
+- **站点管理**：跑 new-api 的站点在 Web UI 填个域名即可接入，后端零改动；顺带选公益/付费分区，之后可随时改
 
 ### 支持的账号类型
 
@@ -60,7 +61,7 @@ uvicorn balance_server:app --host 0.0.0.0 --port 8003
 | `agentrouter_sessions.json` | 登录 session 缓存 |
 | `daily_usage.json` | 每日用量快照（90 天） |
 | `keys_cache.json` | API 密钥列表缓存 |
-| `newapi_sites.json` / `checkin_settings.json` / `*_checkin_state.json` | 站点清单 / 签到设置 / 签到状态 |
+| `newapi_sites.json` / `checkin_settings.json` / `*_checkin_state.json` | 站点清单（含 `tier` 公益/付费分区）/ 签到设置 / 签到状态 |
 
 ## 测试
 

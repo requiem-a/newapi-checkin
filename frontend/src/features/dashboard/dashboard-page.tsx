@@ -12,12 +12,14 @@ import { KpiCard } from "@/shared/components/kpi-card";
 import { KpiSkeleton } from "@/shared/components/skeleton";
 import { PageHeader } from "@/shared/components/page-header";
 import { siteDotClass } from "@/shared/lib/site-color";
+import { SITE_TIERS, TIER_LABEL, TIER_SITE_LABEL, tierTextClass } from "@/shared/lib/site-tier";
 import { cn } from "@/shared/lib/cn";
 import { apiGet } from "@/shared/api/client";
-import type { CheckinStatusResponse, UsageHistory } from "@/types";
+import type { CheckinStatusResponse, SiteTier, UsageHistory } from "@/types";
 
 import { UsageTrend } from "@/features/usage/usage-trend";
 import { computeUsageStats, healthLevel, healthLabel, healthTextClass } from "@/features/usage/usage-stats";
+import { useTierOf } from "@/features/sites/use-tier-of";
 import { getAnyrouterCheckinStatus } from "@/features/checkin/checkin-api";
 import { StatusChip } from "@/features/checkin/checkin-card";
 import { isCheckedStatus, errorMessage } from "@/features/checkin/checkin-format";
@@ -37,8 +39,20 @@ export function DashboardPage() {
   const historyQ = useQuery({ queryKey: ["usage", "history"], queryFn: () => apiGet<UsageHistory>("/usage/history") });
   const loginStatusQ = useQuery({ queryKey: ["checkin", "login-status"], queryFn: () => apiGet<CheckinStatusResponse>("/login-accounts/checkin/status"), retry: false });
   const cookieStatusQ = useQuery({ queryKey: ["checkin", "cookie-status-machine"], queryFn: getAnyrouterCheckinStatus, retry: false });
+  const tierOf = useTierOf();
 
-  const stats = useMemo(() => (historyQ.data ? computeUsageStats(historyQ.data) : null), [historyQ.data]);
+  const stats = useMemo(() => (historyQ.data ? computeUsageStats(historyQ.data, tierOf) : null), [historyQ.data, tierOf]);
+
+  /** 每个分区各有多少账号 / 站点，给 KPI 卡当副行——余额数字单看没有规模感 */
+  const tierCounts = useMemo(() => {
+    const counts: Record<SiteTier, { accounts: number; providers: number }> = {
+      public: { accounts: 0, providers: 0 },
+      paid: { accounts: 0, providers: 0 },
+    };
+    for (const a of stats?.accounts ?? []) counts[a.tier].accounts += 1;
+    for (const p of stats?.providers ?? []) counts[p.tier].providers += 1;
+    return counts;
+  }, [stats]);
 
   const chipAccounts = useMemo(() => {
     const out: { provider: string; name: string; status: Parameters<typeof isCheckedStatus>[0]; message: string }[] = [];
@@ -50,7 +64,10 @@ export function DashboardPage() {
 
   const signedCount = chipAccounts.filter((a) => isCheckedStatus(a.status)).length;
   const today = stats?.days[stats.days.length - 1];
-  const totalBalance = today?.balance ?? 0;
+  const tierBalance: Record<SiteTier, number> = {
+    public: today?.balancePublic ?? 0,
+    paid: today?.balancePaid ?? 0,
+  };
   const todaySpend = today?.spend ?? 0;
 
   const pieConfig = useMemo<ChartConfig>(() => {
@@ -77,10 +94,22 @@ export function DashboardPage() {
           </>
         ) : (
           <>
-        <KpiCard label="总余额" value={money(totalBalance)} sub="全部站点合计" icon={Coins} iconClass="text-site-0" href="/accounts" delay={0} />
-        <KpiCard label="今日消耗" value={money(todaySpend)} sub="相对当日首次快照" icon={Flame} iconClass="text-site-1" href="/usage" delay={60} />
-        <KpiCard label="今日签到" value={chipAccounts.length > 0 ? `${signedCount} / ${chipAccounts.length}` : "--"} sub="已签到 / 总数" icon={CalendarCheck} iconClass="text-checkin-done" href="/checkin" delay={120} />
-        <KpiCard label="账号 / 站点" value={`${stats?.accounts.length ?? 0} / ${stats?.providers.length ?? 0}`} sub="覆盖的站点与账号" icon={Wallet} iconClass="text-site-3" href="/sites" delay={180} />
+        {/* 余额按公益 / 付费拆成两张卡：混在一个「总余额」里看不出这钱是白来的还是充的。
+            总额仍可看：用量分析页保留「总余额」卡，趋势图两条线相加即总额。 */}
+        {SITE_TIERS.map((tier, i) => (
+          <KpiCard
+            key={tier}
+            label={`${TIER_SITE_LABEL[tier]}余额`}
+            value={money(tierBalance[tier])}
+            sub={`${tierCounts[tier].accounts} 个账号 · ${tierCounts[tier].providers} 个站点`}
+            icon={tier === "public" ? Coins : Wallet}
+            iconClass={tierTextClass(tier)}
+            href="/accounts"
+            delay={i * 60}
+          />
+        ))}
+        <KpiCard label="今日消耗" value={money(todaySpend)} sub="相对当日首次快照" icon={Flame} iconClass="text-site-1" href="/usage" delay={120} />
+        <KpiCard label="今日签到" value={chipAccounts.length > 0 ? `${signedCount} / ${chipAccounts.length}` : "--"} sub="已签到 / 总数" icon={CalendarCheck} iconClass="text-checkin-done" href="/checkin" delay={180} />
           </>
         )}
       </section>
@@ -105,9 +134,10 @@ export function DashboardPage() {
                 <div className="mt-3 space-y-1.5">
                   {stats.providers.map((p) => (
                     <div key={p.provider} className="flex items-center justify-between text-xs">
-                      <span className="flex items-center gap-1.5">
+                      <span className="flex min-w-0 items-center gap-1.5">
                         <span className={siteDotClass(p.provider)} aria-hidden="true" />
-                        {p.provider}
+                        <span className="truncate">{p.provider}</span>
+                        <span className={cn("shrink-0 text-[10px]", tierTextClass(p.tier))}>{TIER_LABEL[p.tier]}</span>
                       </span>
                       <span className="font-data tabular-nums">{money(p.balance)}</span>
                     </div>
@@ -206,6 +236,7 @@ export function DashboardPage() {
                         <span className="flex items-center gap-1.5 text-xs">
                           <span className={siteDotClass(a.provider)} aria-hidden="true" />
                           {a.provider}
+                          <span className={cn("text-[10px]", tierTextClass(a.tier))}>{TIER_LABEL[a.tier]}</span>
                         </span>
                       </TableCell>
                       <TableCell className="text-xs font-medium">{a.name}</TableCell>

@@ -48,6 +48,11 @@
   /* 余额告警 */
   --balance-low: oklch(0.65 0.18 45);
 
+  /* 站点分区（公益 / 付费）。色相 185 / 305：都不落在签到三态（155/80/25）上，
+     也刻意和 --site-N 的站点标识色分开——分区是"这笔额度从哪来"，站点色是"哪个站"。 */
+  --tier-public: oklch(0.64 0.11 185);
+  --tier-paid: oklch(0.62 0.14 305);
+
   /* 站点标识色。色相 235/285/320/195/265/350，与上面的语义色相互不干扰 */
   --site-0: oklch(0.62 0.15 235);
   --site-1: oklch(0.6 0.16 285);
@@ -93,6 +98,9 @@
 
   --balance-low: oklch(0.75 0.15 45);
 
+  --tier-public: oklch(0.74 0.11 185);
+  --tier-paid: oklch(0.72 0.14 305);
+
   --site-0: oklch(0.74 0.12 235);
   --site-1: oklch(0.72 0.13 285);
   --site-2: oklch(0.74 0.13 320);
@@ -132,6 +140,9 @@
   --color-checkin-pending: var(--checkin-pending);
   --color-checkin-failed: var(--checkin-failed);
   --color-balance-low: var(--balance-low);
+
+  --color-tier-public: var(--tier-public);
+  --color-tier-paid: var(--tier-paid);
 
   --color-site-0: var(--site-0);
   --color-site-1: var(--site-1);

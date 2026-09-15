@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote, urlparse
 
 # anyrouter.top 与 agentrouter.org 现均需经本地代理（mihomo 7890）访问，且需浏览器级 TLS 指纹
@@ -239,6 +240,7 @@ NEWAPI_DEFAULTS = {
 	'quota_per_unit': 500000,
 	'concurrency': 10,
 	'accent': 'orange',
+	'tier': 'public',
 }
 
 # 首次运行时写入 newapi_sites.json 的内容。gorouter 的数据文件名沿用历史命名，
@@ -249,6 +251,7 @@ NEWAPI_SEED_SITES = [
 		'label': 'GoRouter',
 		'domain': 'https://gorouter.app',
 		'accent': 'orange',
+		'tier': 'public',
 		'accounts_file': 'gorouter_accounts.json',
 		'state_file': 'gorouter_checkin_state.json',
 	},
@@ -257,6 +260,7 @@ NEWAPI_SEED_SITES = [
 		'label': 'TaBiAI',
 		'domain': 'https://tabitoken.com',
 		'accent': 'sky',
+		'tier': 'public',
 	},
 ]
 
@@ -357,6 +361,10 @@ class NewapiSite(BaseModel):
 	label: str
 	domain: str
 	accent: str = 'orange'
+	# 站点分区：public = 公益站（免费发额度），paid = 付费站（自己充钱）。
+	# 只影响前端把额度拆成两条曲线统计，不改变任何抓取/签到行为——
+	# 混在一个总数里看不出这钱是白来的还是充的。
+	tier: Literal['public', 'paid'] = 'public'
 	user_info_path: str = NEWAPI_DEFAULTS['user_info_path']
 	sign_in_path: str = NEWAPI_DEFAULTS['sign_in_path']
 	status_path: str = NEWAPI_DEFAULTS['status_path']

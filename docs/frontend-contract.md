@@ -64,6 +64,11 @@
 
 ### 通用 new-api 站点（`{site_id}` 路径参数，加站点零改代码）
 
+> 后续变更（不影响上表的验收结论）：`NewapiSite` 增加了 `tier: 'public' | 'paid'` 字段
+> （公益站 / 付费站分区，缺省 `public`），由前端把额度拆成公益、付费两条余额曲线。
+> 它只参与统计展示，不改变任何抓取与签到行为，也不影响 `_ref` 寻址协议。
+> 见 `shared/lib/site-tier.ts`。
+
 | GET/POST `/api/sites` | 3002/3008 | 站点清单读写 | `{sites:[NewapiSite]}` | `{success,sites}` | ✅ |
 | POST `/api/sites/probe` | 3032 | 探测域名是否 new-api | `{domain}` | `{success,info{version,system_name,checkin_enabled,turnstile_check,quota_per_unit}}` | ✅ |
 | GET/POST `/api/site/{id}/accounts` | 3067/3076 | 站点账号读写 | `{accounts:[{name,access_token,user_id}]}` | — | ✅ |

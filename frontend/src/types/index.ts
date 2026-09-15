@@ -59,6 +59,12 @@ export interface AccountsListPayload<T> {
 // 站点注册表：GET/POST /api/sites、POST /api/sites/probe
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * 站点分区：`public` = 公益站（免费发额度），`paid` = 付费站（自己充钱）。
+ * 后端 `NewapiSite.tier` 是 `Literal['public','paid']`，非法值在保存时就会被 pydantic 拒绝。
+ */
+export type SiteTier = "public" | "paid";
+
 /** 一个 new-api 同构站点的完整配置（model_dump() 总是补全全部字段） */
 export interface NewapiSite {
   /** 决定接口路径 /api/site/{id}/... 与数据文件名，创建后不应再改 */
@@ -70,6 +76,8 @@ export interface NewapiSite {
    * --site-N token（见 shared/lib/site-color.ts），仅为与后端往返一致而保留。
    */
   accent: string;
+  /** 分区，决定额度算进公益还是付费那条曲线 */
+  tier: SiteTier;
   user_info_path: string;
   sign_in_path: string;
   status_path: string;
