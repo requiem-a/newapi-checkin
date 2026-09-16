@@ -157,6 +157,57 @@ login 按 username；站点账号按 `site_id:user_id`。
 - **缓慢模式**（`:2503`）：随机顺序，账号间隔 30~60 分钟（可配 1~1440），跑后台可关页面
 - 任一运行中点另一个都会被拦截提示「正在运行中」
 
+### 站点 / 账号健康点（`shared/components/health-dot.tsx`）
+
+站点卡片标题行与账号表格行各有一颗存活状态圆点。它和站点身份色点（`shared/lib/site-color.ts`
+哈希出的 `--site-N`）、分区点（`site-tier.ts` 的 `--tier-*`）是三件事，**并排出现且互不顶替**：
+身份色点答「哪个站」，分区点答「额度从哪来」，健康点答「现在通不通」。
+
+**四色定义**（推导逻辑全在 `shared/lib/site-health.ts`，纯函数、可单测）：
+
+| 后端返回 | 健康态 | 颜色 |
+|---|---|---|
+| `success: true` | `healthy` | 绿 `bg-checkin-done` |
+| `error` 是 `HTTP 4xx`（401/403/404/429） | `warning` | 黄 `bg-checkin-pending` |
+| `error` 是 `HTTP 5xx`（500/502/503：源站挂了） | `error` | 红 `bg-checkin-failed` |
+| `error` 以 `API 返回失败` 开头（上游 200 但 `success:false`） | `warning` | 黄 |
+| `error` 命中网络关键字（`timeout` / `连接` / `failed to connect` …） | `error` | 红 `bg-checkin-failed` |
+| 其它 `error`、配置类整站失败（站点不存在 / 无账号 / 重名被拒） | `warning` | 黄 |
+| 还没查过（`undefined`） | `unknown` | 灰 |
+
+判定顺序不可颠倒：**先看 `HTTP {状态码}` 前缀，再扫网络关键字**。反过来的话
+`HTTP 429: too many requests, timeout` 这类混合文案会被关键字抢走判成红点——它其实是连上了被限流。
+
+状态码内部还要再分一层：**4xx 是「连上了被拒绝 / 限流」，5xx 是「对面服务本身坏了」**。
+后者典型就是 Cloudflare 活着、后面源站挂掉返回的 502——请求确实发出去了，但效果上等同连不上，
+必须标红，否则一个死掉的站会一直显示成温和的黄色。
+
+网络关键字表按 curl_cffi 的真实异常文案补过（后端会把异常拼成 `{类型名}: {原文}`，
+停代理是 `ConnectionError: ... Failed to connect`、解析失败是 `DNSError: ... Could not resolve`），
+只按最早约定的 6 个词扫的话，这些「连不上」会被判成黄色。
+
+整站级失败（`{success:false}` + HTTP 200，被 `client.ts` 的 `unwrapEnvelope` 抛成 `ApiError`）
+不是网络故障，前端把它按同一套文案规则分流，tooltip 原样展示后端原文（如「同一站点内账号
+name 不能重复，请使用唯一名称」），不要显示成网络红点。
+
+**最严重聚合**：站点卡片的点取该站点所有账号里最严重的一颗，严重程度严格是
+红 > 黄 > 灰 > 绿（`HEALTH_SEVERITY`）。`unknown` 刻意排在 `healthy` 之上——「有个账号还没查过」
+比「有个账号正常」更该被看见；站点没有账号时聚合结果也是灰，不能是绿。tooltip 里的失败原文
+（`worstFailureText`）必须取**同一条最严重**的账号，不能取第一条失败——否则会出现红点配
+`HTTP 401` 文案的自相矛盾，用户照文案去查 401，红点暗示的却是连不上。
+
+**代理切换置灰**：`onToggleProxy` 成功后该站点的健康必须重置为灰。健康天然与出口绑定
+（后端 Turnstile 缓存键就是 `turnstile:{id}:{domain}:{proxy|direct}`），留着上一出口的结论就是错的。
+
+其它约束：
+
+- 健康态只存在组件本地 `useState`，**不落盘**（刷新页面回到灰是可接受的），也**绝不复用**
+  `["accounts","site-accounts"]` / `["accounts","site-account-counts"]` 两个 queryKey——
+  那两个键存数组和数字，污染会让账号页 `(1 ?? []).entries()` 崩溃
+- 账号行的数据源是已有的 `balances`，不新增请求；整站查询被拒的站点其账号行保持灰
+- 站点页不做页面加载自动探测，只有点击健康点才重查**对应那一个**站点
+- tooltip 只出现状态文案、失败原因原文、上次同步时间，绝不携带 `access_token` 等凭据
+
 ### 其它
 
 - **Cookie 续期**（`:2846`）：仅 cookie 类账号，撞站点限流会显示 notice 提示条

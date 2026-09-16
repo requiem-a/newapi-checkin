@@ -10,15 +10,17 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { EmptyState, ErrorState, LoadingState } from "@/shared/components/data-state";
+import { HealthDot } from "@/shared/components/health-dot";
 import { PageHeader } from "@/shared/components/page-header";
 import { apiPost } from "@/shared/api/client";
 import { getSiteTurnstile } from "@/features/checkin/checkin-api";
 import { siteDotClass } from "@/shared/lib/site-color";
+import { aggregateHealth, worstFailureText, healthFromErrorText, healthFromResult, type SiteHealthEntry } from "@/shared/lib/site-health";
 import { SITE_TIERS, TIER_DESCRIPTION, TIER_SITE_LABEL, tierDotClass, tierTextClass } from "@/shared/lib/site-tier";
 import { cn } from "@/shared/lib/cn";
 import type { NewapiSite, SiteProbeResponse, SiteTier, SitesResponse } from "@/types";
 
-import { fetchSiteAccounts, fetchSites } from "@/features/accounts/accounts-api";
+import { fetchSiteAccounts, fetchSites, querySiteBalances } from "@/features/accounts/accounts-api";
 import { errorMessage } from "@/features/checkin/checkin-format";
 
 export function SitesPage() {
@@ -45,6 +47,11 @@ export function SitesPage() {
   const [probeResult, setProbeResult] = useState<{ domain: string; ok: boolean; system_name: string; version: string; checkin_enabled: boolean; turnstile_check: boolean; quota_per_unit: number } | null>(null);
   const [adding, setAdding] = useState(false);
   const [savingTier, setSavingTier] = useState<string | null>(null);
+  // 健康态只活在组件本地：不落盘、不进 React Query 缓存。绝不能复用 accounts 的
+  // "site-accounts" / "site-account-counts" 键——那两个键存的是数组和数字，
+  // 塞进去会让账号页渲染 (1 ?? []).entries() 时崩掉。
+  const [health, setHealth] = useState<Record<string, SiteHealthEntry>>({});
+  const [healthLoading, setHealthLoading] = useState<string | null>(null);
 
   if (sitesQ.isError) return <ErrorState message={errorMessage(sitesQ.error, "站点列表加载失败")} onRetry={() => void sitesQ.refetch()} />;
 
@@ -94,6 +101,7 @@ export function SitesPage() {
       const input = { id: newId.trim(), label: newLabel.trim(), domain, tier: newTier };
       await apiPost<SitesResponse>("/sites", { sites: [...sites, input] });
       await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      setHealth({}); // 整表替换：站点集合变了，旧的逐站结论不再对应得上
       toast.success(`已接入 ${input.label}（${TIER_SITE_LABEL[newTier]}），去「账号管理」添加它的账号`);
       setNewId("");
       setNewLabel("");
@@ -112,6 +120,7 @@ export function SitesPage() {
     try {
       await apiPost<SitesResponse>("/sites", { sites: sites.filter((s) => s.id !== site.id) });
       await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      setHealth({}); // 同上：整表替换后逐站结论作废
       toast.success(`已移除 ${site.label}（账号数据已保留）`);
     } catch (err) {
       toast.error(errorMessage(err, "删除失败"));
@@ -133,12 +142,48 @@ export function SitesPage() {
     }
   }
 
+  /**
+   * 点健康点：只重查这一个站点，不碰其它站点。
+   *
+   * 整站被拒（站点不存在 / 没账号 / 重名）走 catch——后端这几种都是 HTTP 200 +
+   * `{success:false}`，被 client.ts 的 unwrapEnvelope 抛成 ApiError。它们是配置问题而非
+   * 网络问题，所以统一交给 healthFromErrorText 按文案分流，并把后端原文原样塞进 tooltip。
+   */
+  async function onRefreshHealth(site: NewapiSite) {
+    if (healthLoading) return;
+    setHealthLoading(site.id);
+    try {
+      const results = await querySiteBalances(site.id);
+      setHealth((prev) => ({
+        ...prev,
+        [site.id]: {
+          health: aggregateHealth(results.map(healthFromResult)),
+          detail: worstFailureText(results),
+          syncedAt: Date.now(),
+        },
+      }));
+    } catch (err) {
+      const detail = errorMessage(err, "查询失败");
+      setHealth((prev) => ({ ...prev, [site.id]: { health: healthFromErrorText(detail), detail, syncedAt: Date.now() } }));
+      toast.error(`${site.label} 查询失败：${detail}`);
+    } finally {
+      setHealthLoading(null);
+    }
+  }
+
   /** 切代理开关。同样是整表回写；后端连接池缓存键带代理模式，改完立刻生效、不用重启 */
   async function onToggleProxy(site: NewapiSite, useProxy: boolean) {
     setSavingTier(site.id);
     try {
       await apiPost<SitesResponse>("/sites", { sites: sites.map((s) => (s.id === site.id ? { ...s, use_proxy: useProxy } : s)) });
       await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      // 健康态和出口绑定（后端 Turnstile 缓存键就是 turnstile:{id}:{domain}:{proxy|direct}），
+      // 换了出口上一轮的结论立刻失效，必须退回灰点重查
+      setHealth((prev) => {
+        const next = { ...prev };
+        delete next[site.id];
+        return next;
+      });
       toast.success(useProxy ? `${site.label} 已改为走本地代理` : `${site.label} 已改为直连`);
     } catch (err) {
       toast.error(errorMessage(err, "保存失败"));
@@ -240,6 +285,9 @@ export function SitesPage() {
                       count={countsQ.data?.[site.id] ?? 0}
                       index={i}
                       saving={savingTier === site.id}
+                      health={health[site.id]}
+                      healthLoading={healthLoading === site.id}
+                      onRefreshHealth={() => void onRefreshHealth(site)}
                       onTierChange={(next) => void onTierChange(site, next)}
                       onToggleProxy={(useProxy) => void onToggleProxy(site, useProxy)}
                       onDelete={() => void onDelete(site)}
@@ -260,6 +308,9 @@ function SiteCard({
   count,
   index,
   saving,
+  health,
+  healthLoading,
+  onRefreshHealth,
   onTierChange,
   onToggleProxy,
   onDelete,
@@ -268,6 +319,10 @@ function SiteCard({
   count: number;
   index: number;
   saving: boolean;
+  /** undefined = 这一轮还没查过，渲染成灰点 */
+  health: SiteHealthEntry | undefined;
+  healthLoading: boolean;
+  onRefreshHealth: () => void;
   onTierChange: (tier: SiteTier) => void;
   onToggleProxy: (useProxy: boolean) => void;
   onDelete: () => void;
@@ -289,6 +344,15 @@ function SiteCard({
           <div className="flex items-center gap-2">
             <span className={siteDotClass(site.id)} aria-hidden="true" />
             <h3 className="truncate text-sm font-medium">{site.label}</h3>
+            <HealthDot
+              health={health?.health ?? "unknown"}
+              subject={site.label}
+              detail={health?.detail}
+              syncedAt={health?.syncedAt}
+              loading={healthLoading}
+              readOnly={saving}
+              onRefresh={onRefreshHealth}
+            />
             <span className="font-data shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{site.id}</span>
           </div>
           <a href={site.domain.startsWith("http") ? site.domain : `https://${site.domain}`} target="_blank" rel="noreferrer" className="font-data mt-1 block truncate text-xs text-muted-foreground hover:text-foreground hover:underline">

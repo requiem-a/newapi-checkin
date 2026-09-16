@@ -14,11 +14,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, ErrorState, LoadingState } from "@/shared/components/data-state";
+import { HealthDot } from "@/shared/components/health-dot";
 import { KpiCard } from "@/shared/components/kpi-card";
 import { PageHeader } from "@/shared/components/page-header";
 import { SortableTableHead } from "@/shared/components/sortable-table-head";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { siteDotClass } from "@/shared/lib/site-color";
+import { healthFromResult } from "@/shared/lib/site-health";
 import { cn } from "@/shared/lib/cn";
 import type { AccountRef } from "@/shared/lib/account-ref";
 import type { QueryResult, QueryResultSuccess, SiteAccount } from "@/types";
@@ -112,6 +114,9 @@ export function AccountsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [balances, setBalances] = useState<Record<string, QueryResult>>({});
+  // 每行的上次同步时间，键与 balances 相同（`${keyPrefix}:${name}`）。健康颜色直接从
+  // balances 推导（见 healthFromResult），这里只补一个"什么时候查的"。
+  const [healthMeta, setHealthMeta] = useState<Record<string, { time: number }>>({});
   const [form, setForm] = useState<FormState | null>(null);
   const [editingRef, setEditingRef] = useState<AccountRef | null>(null);
 
@@ -319,6 +324,14 @@ export function AccountsPage() {
     ];
     await Promise.all(tasks);
     setBalances((prev) => Object.assign({}, prev, ...merged));
+    // 只给真正拿到结果的行记时间：整站查询被拒（上面 .catch 吞掉）的行必须留在灰点，
+    // 不能因为"点过一次查询"就装作已经查过
+    const syncedAt = Date.now();
+    setHealthMeta((prev) => {
+      const next = { ...prev };
+      for (const patch of merged) for (const key of Object.keys(patch)) next[key] = { time: syncedAt };
+      return next;
+    });
     // login-accounts/balances 会顺手写今日用量快照，查询后基线要重新取
     void queryClient.invalidateQueries({ queryKey: ["accounts", "baseline"] });
     setQuerying(false);
@@ -567,8 +580,9 @@ export function AccountsPage() {
               </TableHeader>
               <TableBody>
                 {filtered.map((row, i) => {
-                  const result = balances[`${row.keyPrefix}:${row.name}`];
-                  const today = computeTodayUsed(result?.success ? result : undefined, baselineQ.data?.baseline[`${row.keyPrefix}:${row.name}`]);
+                  const balanceKey = `${row.keyPrefix}:${row.name}`;
+                  const result = balances[balanceKey];
+                  const today = computeTodayUsed(result?.success ? result : undefined, baselineQ.data?.baseline[balanceKey]);
                   return (
                     <TableRow
                       key={row.ref}
@@ -594,7 +608,18 @@ export function AccountsPage() {
                         </span>
                       </TableCell>
                       <TableCell>
-                        <div className="text-xs font-medium">{row.name}</div>
+                        {/* 健康点跟账号名放一起，不和「站点」列的身份色点挤在一行——
+                            那里已经有站点标识色点，两颗点并排谁也认不出谁 */}
+                        <div className="flex items-center gap-1.5 text-xs font-medium">
+                          <HealthDot
+                            health={healthFromResult(result)}
+                            subject={`${row.providerLabel} ${row.name}`}
+                            detail={result && !result.success ? result.error : undefined}
+                            syncedAt={healthMeta[balanceKey]?.time}
+                            readOnly
+                          />
+                          {row.name}
+                        </div>
                         <div className="font-data text-[11px] text-muted-foreground">{row.identifier}</div>
                         {row.tokenMask ? <div className="font-data text-[11px] text-muted-foreground">{row.tokenMask}</div> : null}
                       </TableCell>
