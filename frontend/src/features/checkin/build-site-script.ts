@@ -11,8 +11,8 @@
  * 3. sitekey 绝不硬编码，来自 Turnstile 探测结果；拿不到就让脚本自我拒绝，
  *    不能拿空值渲染（tests/test_site_frontend.mjs 有断言）。
  * 4. 只用 createElement，不用 innerHTML —— 规避 Trusted Types。
- * 5. Turnstile widget 用 seq + settle() 序号隔离 —— 防止上一账号的 30s 超时回调
- *    错误地 resolve 下一账号的等待 Promise。
+ * 5. Turnstile widget 用 seq + settle() 序号隔离，并让回调捕获当前序号——防止上一账号
+ *    的迟到回调错误地 resolve 下一账号的等待 Promise。
  *
  * 另：账号名含引号或 </script> 不会破坏脚本——所有动态值都经 JSON.stringify 注入。
  */
@@ -24,14 +24,17 @@ import type { NewapiSite, SiteAccount, SiteSyncResult, TurnstileStatus } from "@
  * 查不到结果的账号保守保留 —— 最多让脚本收到一句「今日已签到」，不丢签到机会。
  */
 export function filterPendingAccounts(accs: SiteAccount[], results: SiteSyncResult[]): SiteAccount[] {
-  const byName = new Map<string, SiteSyncResult>();
-  for (const r of results) {
-    if (r && r.name) byName.set(r.name, r);
-  }
-  return accs.filter((a) => {
-    const r = byName.get(a.name);
-    return !r || r.success !== true;
-  });
+	const byUserId = new Map<string, SiteSyncResult>();
+	const byName = new Map<string, SiteSyncResult>();
+	for (const r of results) {
+		if (!r) continue;
+		if (r.user_id) byUserId.set(String(r.user_id), r);
+		else if (r.name) byName.set(r.name, r);
+	}
+	return accs.filter((a) => {
+		const r = byUserId.get(String(a.user_id)) ?? byName.get(a.name);
+		return !r || r.success !== true;
+	});
 }
 
 export function buildSiteScript(site: NewapiSite, accs: SiteAccount[], ts: TurnstileStatus): string {
@@ -55,11 +58,11 @@ export function buildSiteScript(site: NewapiSite, accs: SiteAccount[], ts: Turns
     "  const settle = (s, err, tok) => { if (s !== seq || !pend) return; const p = pend; pend = null;",
     "    err ? p.rej(new Error(err)) : p.res(tok); };",
     "  const getToken = () => { const s = ++seq; return new Promise((res, rej) => { pend = { res, rej };",
-    "    if (wid === null) { wid = turnstile.render(box, { sitekey: SITEKEY,",
-    "      callback: t => settle(seq, null, t),",
-    "      'error-callback': e => settle(seq, 'Turnstile 错误 ' + e),",
-    "      'timeout-callback': () => settle(seq, 'Turnstile 超时') }); }",
-    "    else { turnstile.reset(wid); }",
+    "    if (wid !== null) { try { turnstile.remove(wid); } catch (e) {} wid = null; }",
+    "    wid = turnstile.render(box, { sitekey: SITEKEY,",
+    "      callback: t => settle(s, null, t),",
+    "      'error-callback': e => settle(s, 'Turnstile 错误 ' + e),",
+    "      'timeout-callback': () => settle(s, 'Turnstile 超时') });",
     "    setTimeout(() => settle(s, 'Turnstile 30s 超时'), 30000); }); };",
     "  let ok = 0, already = 0, bad = 0;",
     "  console.log('%c开始签到 ' + A.length + ' 个账号', 'color:#f59e0b;font-weight:bold');",

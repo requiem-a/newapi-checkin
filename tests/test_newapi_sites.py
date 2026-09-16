@@ -378,6 +378,78 @@ def test_保存站点会去掉域名末尾斜杠(sandbox):
 	assert out['sites'][0]['domain'] == 'https://a.com', '末尾斜杠会让拼出的路径变成 //api/...'
 
 
+def test_保存站点接受大小写scheme并规范化(sandbox):
+	out = asyncio.run(bs.save_sites({'sites': [{'id': 'a', 'label': 'A', 'domain': 'HtTp://a.com/'}]}))
+	assert out['success'] is True
+	assert out['sites'][0]['domain'] == 'http://a.com'
+
+
+@pytest.mark.parametrize('domain', ['ftp://a.com', 'https://'])
+def test_保存站点拒绝非法根地址(sandbox, domain):
+	out = asyncio.run(bs.save_sites({'sites': [{'id': 'a', 'label': 'A', 'domain': domain}]}))
+	assert out['success'] is False
+
+
+def test_读取旧站点配置时自动补全裸域名(sandbox):
+	write_sites(sandbox, [{'id': 'a', 'label': 'A', 'domain': 'a.com'}])
+	assert bs.get_newapi_site('a').domain == 'https://a.com'
+
+
+def test_站点账号拒绝同名账号(sandbox):
+	s = site(id='dup')
+	write_sites(sandbox, [s.model_dump()])
+	out = asyncio.run(
+		bs.post_site_accounts(
+			'dup',
+			{
+				'accounts': [
+					{'name': 'same', 'access_token': 't1', 'user_id': '1'},
+					{'name': 'same', 'access_token': 't2', 'user_id': '2'},
+				]
+			},
+		)
+	)
+	assert out['success'] is False and '重复' in out['error']
+
+
+def test_遗留同名账号配置不能启动签到(sandbox, monkeypatch):
+	s = site(id='dup')
+	write_sites(sandbox, [s.model_dump()])
+	s.accounts_path().write_text(
+		json.dumps(
+			[
+				{'name': 'same', 'access_token': 't1', 'user_id': '1'},
+				{'name': 'same', 'access_token': 't2', 'user_id': '2'},
+			]
+		),
+		encoding='utf-8',
+	)
+	started = []
+	monkeypatch.setattr(bs, 'start_newapi_checkin', lambda *args, **kwargs: started.append(True))
+	out = asyncio.run(bs.site_checkin_start('dup'))
+	assert out['success'] is False and '重复' in out['error']
+	assert started == []
+
+
+def test_turnstile缓存按代理模式隔离(sandbox, monkeypatch):
+	calls = []
+
+	async def fake_request(s_, method, path, headers, json_body=None):
+		calls.append(s_.use_proxy)
+		return FakeResponse(
+			payload={'data': {'turnstile_check': True, 'turnstile_site_key': 'key' if s_.use_proxy else ''}}
+		)
+
+	monkeypatch.setattr(bs, 'newapi_request', fake_request)
+	direct = site(id='same', use_proxy=False)
+	proxied = site(id='same', use_proxy=True)
+	first = asyncio.run(bs.newapi_turnstile_status(direct))
+	second = asyncio.run(bs.newapi_turnstile_status(proxied))
+	assert first['site_key'] == ''
+	assert second['site_key'] == 'key'
+	assert calls == [False, True]
+
+
 def test_同步状态用未挂turnstile的get核对(sandbox, monkeypatch):
 	"""浏览器脚本签完后，后端必须靠 GET 读真实状态，而不是相信脚本的自报。"""
 	s = site()

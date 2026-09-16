@@ -135,7 +135,7 @@ export function UsagePage() {
           iconClass={pop30 !== null && pop30 > 5 ? "text-checkin-failed" : pop30 !== null && pop30 < -5 ? "text-checkin-done" : "text-site-2"}
           delay={120}
         />
-        <KpiCard label={`签到收益（${period} 天）`} value={money(totalGain)} sub="按 quota 日增量统计" icon={TrendingUp} iconClass="text-checkin-done" delay={180} />
+        <KpiCard label={`签到收益（${period} 天）`} value={money(totalGain)} sub="按 Δquota + Δused 估算" icon={TrendingUp} iconClass="text-checkin-done" delay={180} />
           </>
         )}
       </section>
@@ -248,7 +248,7 @@ export function UsagePage() {
 
       <section className="rounded-lg bg-card p-4 sm:p-5">
         <h2 className="text-sm font-medium">签到热力图</h2>
-        <p className="mt-1 text-xs text-muted-foreground">根据额度变化推算（后端未持久化签到历史，quota 较前一日增加即视为当日签到成功）</p>
+        <p className="mt-1 text-xs text-muted-foreground">根据相邻快照的 Δquota + Δused 推算（后端未持久化签到历史，断档不计入）</p>
         <div className="mt-3 overflow-x-auto">
           {historyQ.isLoading ? (
             <Skeleton className="h-40 w-full" />

@@ -153,7 +153,7 @@ export function CheckinPage() {
         }
         return;
       }
-      // Turnstile 站点：生成浏览器脚本。先跑 sync 剔除今日已签——token 一次性，替已签的取 token 是纯浪费
+      // Turnstile 站点：先同步剔除今日已签；随后优先内嵌验证，失败时可回退浏览器脚本。
       let pending = accs;
       try {
         const sync = await syncSiteCheckin(site.id);
@@ -250,7 +250,7 @@ export function CheckinPage() {
           subtitle={hasRunHistory(cookieState) ? finishedSummary(cookieState) : undefined}
           actions={
             <>
-              <Button size="sm" disabled={!!busy} onClick={() => void guard("cookie", startAnyrouterCheckin, () => "Cookie 签到已启动")}>
+              <Button size="sm" disabled={!!busy || !!embedDialog} onClick={() => void guard("cookie", startAnyrouterCheckin, () => "Cookie 签到已启动")}>
                 {busy === "cookie" ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Play className="size-3.5" aria-hidden="true" />}
                 签到
               </Button>
@@ -289,7 +289,7 @@ export function CheckinPage() {
           title="Handle · Token 账号"
           subtitle={`${tokenAccounts.length} 个账号 · 不在每日自动签到范围内，需手动签`}
           actions={
-            <Button size="sm" disabled={!!busy} onClick={() => void onTokenCheckin()}>
+            <Button size="sm" disabled={!!busy || !!embedDialog} onClick={() => void onTokenCheckin()}>
               {busy === "token" ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Play className="size-3.5" aria-hidden="true" />}
               签到
             </Button>
@@ -314,11 +314,11 @@ export function CheckinPage() {
           subtitle={hasRunHistory(loginState) ? (loginState.running ? runningSummary(loginState) : finishedSummary(loginState)) : `${loginAccounts.length} 个账号`}
           actions={
             <>
-              <Button size="sm" disabled={!!busy || loginState?.running} onClick={() => void guard("fast", startLoginCheckinFast, () => "一键全签已启动（约 1~2 分钟）")}>
+              <Button size="sm" disabled={!!busy || !!embedDialog || loginState?.running} onClick={() => void guard("fast", startLoginCheckinFast, () => "一键全签已启动（约 1~2 分钟）")}>
                 {busy === "fast" ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Play className="size-3.5" aria-hidden="true" />}
                 一键全签
               </Button>
-              <Button variant="secondary" size="sm" disabled={!!busy || loginState?.running} onClick={() => void guard("slow", startLoginCheckinSlow, () => "缓慢签到已启动，可关闭页面")}>
+              <Button variant="secondary" size="sm" disabled={!!busy || !!embedDialog || loginState?.running} onClick={() => void guard("slow", startLoginCheckinSlow, () => "缓慢签到已启动，可关闭页面")}>
                 缓慢签到
               </Button>
               {loginState?.running ? (
@@ -391,7 +391,7 @@ export function CheckinPage() {
               title={site.label}
               subtitle={hasRunHistory(state) ? (state.running ? runningSummary(state) : finishedSummary(state)) : `${count} 个账号`}
               actions={
-                <Button size="sm" disabled={!!busy} onClick={() => void onSiteCheckin(site)}>
+                <Button size="sm" disabled={!!busy || !!embedDialog} onClick={() => void onSiteCheckin(site)}>
                   {busy === `site:${site.id}` ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Play className="size-3.5" aria-hidden="true" />}
                   签到
                 </Button>

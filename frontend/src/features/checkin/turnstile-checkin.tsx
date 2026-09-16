@@ -14,9 +14,8 @@
  *    登录态会让除当前登录者外的账号全部 401；omit 后各账号用自己的 access_token。
  * 4. sitekey 来自探测接口，绝不硬编码；站点若把 sitekey 限制在其自身域名，widget 会渲染失败
  *    （error-callback），同样走回退。
- * 5. widget 用 seq + settle 序号隔离 —— 防止上一账号的超时回调 resolve 到下一账号。
- *    reset 必须在 getToken 注册好等待者**之后**调用：invisible 挑战解得飞快，先 reset 后
- *    等待会把 token 白白丢掉，下一账号就永远等不到回调。
+ * 5. widget 用 seq + settle 序号隔离；每个账号重建 widget 并让回调捕获本次序号，
+ *    防止上一账号的迟到回调 resolve 到下一账号。
  * 6. token 一次性、有效期 5 分钟：解一个立刻提交一个，成功后再取下一个。
  */
 
@@ -34,7 +33,6 @@ import type { CheckinAccountRunStatus, NewapiSite, SiteAccount, TurnstileStatus 
 
 interface TurnstileApi {
   render: (el: HTMLElement, opts: Record<string, unknown>) => string;
-  reset: (widgetId?: string) => void;
   remove: (widgetId?: string) => void;
 }
 
@@ -90,6 +88,8 @@ export function TurnstileCheckinDialog({
   const [syncing, setSyncing] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
   const widRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const cancelRunRef = useRef<(() => void) | null>(null);
   const userCancelRef = useRef(false);
 
   async function doSync() {
@@ -106,15 +106,19 @@ export function TurnstileCheckinDialog({
   }
 
   async function redeem(a: SiteAccount, token: string): Promise<{ ok: boolean; already: boolean; message: string }> {
+    const controller = new AbortController();
+    abortRef.current = controller;
     const r = await fetch(site.domain + (site.sign_in_path || "/api/user/checkin") + "?turnstile=" + encodeURIComponent(token), {
       method: "POST",
       credentials: "omit",
+      signal: controller.signal,
       headers: {
         Authorization: "Bearer " + a.access_token,
         [site.api_user_key || "new-api-user"]: String(a.user_id),
         Accept: "application/json",
       },
     });
+    if (abortRef.current === controller) abortRef.current = null;
     let d: { success?: boolean; message?: string };
     try {
       d = (await r.json()) as { success?: boolean; message?: string };
@@ -146,14 +150,40 @@ export function TurnstileCheckinDialog({
 
     let seq = 0;
     let waiter: { resolve: (t: string) => void; reject: (e: Error) => void } | null = null;
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
     const settle = (s: number, err: Error | null, token?: string) => {
       if (s !== seq || !waiter) return;
       const p = waiter;
       waiter = null;
+      if (watchdog !== null) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
       if (err) p.reject(err);
       else p.resolve(token!);
     };
     let wid: string | null = null;
+    cancelRunRef.current = () => {
+      seq++;
+      const p = waiter;
+      waiter = null;
+      if (watchdog !== null) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
+      if (p) p.reject(new DOMException("签到流程已取消", "AbortError"));
+      abortRef.current?.abort();
+      abortRef.current = null;
+      if (wid !== null) {
+        try {
+          tsApi.remove(wid);
+        } catch {
+          /* widget 可能已被卸载 */
+        }
+        wid = null;
+        widRef.current = null;
+      }
+    };
     const getToken = () => {
       const s = ++seq;
       return new Promise<string>((resolve, reject) => {
@@ -161,17 +191,26 @@ export function TurnstileCheckinDialog({
         if (wid === null) {
           wid = tsApi.render(box, {
             sitekey: ts.site_key,
-            callback: (t: string) => settle(seq, null, t),
+            callback: (t: string) => settle(s, null, t),
             "error-callback": (code: unknown) =>
-              settle(seq, new Error(`Turnstile 组件错误 ${String(code)}（常见于站点把 sitekey 限制在其自身域名，可改用浏览器脚本）`)),
-            "timeout-callback": () => settle(seq, new Error("Turnstile 验证超时，可重试或改用浏览器脚本")),
+              settle(s, new Error(`Turnstile 组件错误 ${String(code)}（常见于站点把 sitekey 限制在其自身域名，可改用浏览器脚本）`)),
+            "timeout-callback": () => settle(s, new Error("Turnstile 验证超时，可重试或改用浏览器脚本")),
           });
           widRef.current = wid;
         } else {
-          tsApi.reset(wid);
+          // 旧 widget 的回调没有携带 challenge 代际；移除后重渲染，才能可靠隔离迟到回调。
+          tsApi.remove(wid);
+          wid = tsApi.render(box, {
+            sitekey: ts.site_key,
+            callback: (t: string) => settle(s, null, t),
+            "error-callback": (code: unknown) =>
+              settle(s, new Error(`Turnstile 组件错误 ${String(code)}（常见于站点把 sitekey 限制在其自身域名，可改用浏览器脚本）`)),
+            "timeout-callback": () => settle(s, new Error("Turnstile 验证超时，可重试或改用浏览器脚本")),
+          });
+          widRef.current = wid;
         }
         // 挂一个兜底看门狗；stale 定时器因序号不匹配自然失效
-        setTimeout(() => settle(s, new Error("Turnstile 60 秒未完成（可能需要手动点一下验证框）")), 60000);
+        watchdog = setTimeout(() => settle(s, new Error("Turnstile 60 秒未完成（可能需要手动点一下验证框）")), 60000);
       });
     };
 
@@ -185,12 +224,14 @@ export function TurnstileCheckinDialog({
         const token = await getToken();
         if (stop()) return;
         const r = await redeem(a, token);
+        if (stop()) return;
         if (r.ok) ok++;
         else if (r.already) already++;
         else bad++;
         const status: CheckinAccountRunStatus = r.ok ? "signed" : r.already ? "already" : "failed";
         setChips((prev) => prev.map((c, idx) => (idx === i ? { name: a.name, status, message: r.message } : c)));
       } catch (e) {
+        if (stop()) return;
         const msg =
           e instanceof TypeError
             ? "请求被浏览器拦截（CORS 或网络不通），建议改用浏览器脚本"
@@ -222,11 +263,8 @@ export function TurnstileCheckinDialog({
     void run(stop);
     return () => {
       cancelled = true;
-      try {
-        window.turnstile?.remove(widRef.current ?? undefined);
-      } catch {
-        /* 卸载时 widget 可能已不存在 */
-      }
+      cancelRunRef.current?.();
+      cancelRunRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -257,8 +295,8 @@ export function TurnstileCheckinDialog({
         {phase === "done" ? <p className="text-xs text-checkin-done">{summary}{syncing ? " · 正在同步…" : ""}</p> : null}
 
         <div className="flex flex-wrap gap-1.5">
-          {chips.map((c) => (
-            <StatusChip key={c.name} name={c.name} status={c.status} message={c.message} />
+          {chips.map((c, index) => (
+            <StatusChip key={`${c.name}-${c.status}-${index}`} name={c.name} status={c.status} message={c.message} />
           ))}
         </div>
 

@@ -8,12 +8,12 @@
  * - 余额 = quota（美元）
  * - 余额按站点分区分成「公益 / 付费」两桶（tierOf 给出 provider → 分区，见 shared/lib/site-tier.ts）
  * - 每日消耗 = used - used0（当天基线）
- * - 签到收益：后端没有持久化签到历史（checkin_state.date 每轮覆盖），从 quota 的
- *   日增量反推——某天 quota 比前一天高 = 那天签到成功。这是近似值，UI 必须标注。
+ * - 签到/充值入账：后端没有持久化签到历史（checkin_state.date 每轮覆盖），用相邻快照的
+ *   Δquota + Δused 正增量近似；断档不计入，UI 必须标注。
  */
 
 import type { SiteTier, UsageHistory, UsageDayMap } from "@/types";
-import { defaultTierOf, type TierOf } from "@/shared/lib/site-tier";
+import type { TierOf } from "@/shared/lib/site-tier";
 
 export interface DayPoint {
   date: string;
@@ -25,7 +25,7 @@ export interface DayPoint {
   balancePaid: number;
   /** 全账号当日消耗合计 */
   spend: number;
-  /** 全账号签到收益合计（quota 日增量） */
+  /** 全账号签到/充值入账合计（Δquota + Δused 正增量） */
   gain: number;
 }
 
@@ -43,7 +43,7 @@ export interface AccountStat {
   burnRate7: number;
   /** 近 30 日日均消耗 */
   burnRate30: number;
-  /** 签到收益合计（quota 日增量） */
+  /** 签到/充值入账合计（Δquota + Δused 正增量） */
   gain: number;
   /** 按近 7 日速率推算的剩余天数；消耗为 0 或无数据时为 null */
   daysLeft: number | null;
@@ -65,13 +65,30 @@ export interface UsageStats {
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+const fallbackTierOf: TierOf = () => "public";
 
-/** 从 usage key 取 provider。站点 id 不含冒号，账号名可含，所以只切第一段。 */
-function providerOfKey(key: string): string {
-  return key.split(":")[0]!;
+function entrySpend(entry: UsageDayMap[string]): number {
+  return Math.max(0, entry.used - (entry.used0 ?? entry.used));
 }
 
-export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaultTierOf): UsageStats {
+function isConsecutiveDate(previous: string, current: string): boolean {
+  const previousMs = Date.parse(`${previous}T00:00:00Z`);
+  const currentMs = Date.parse(`${current}T00:00:00Z`);
+  return Number.isFinite(previousMs) && Number.isFinite(currentMs) && currentMs - previousMs === 86_400_000;
+}
+
+/** 解析 `provider:账号名`；迁移无法归属的旧裸 key 保留原账号名并标成 unknown。 */
+function parseUsageKey(key: string): { provider: string; name: string } {
+  const separator = key.indexOf(":");
+  if (separator < 0) return { provider: "unknown", name: key };
+  return { provider: key.slice(0, separator), name: key.slice(separator + 1) };
+}
+
+function providerOfKey(key: string): string {
+  return parseUsageKey(key).provider;
+}
+
+export function computeUsageStats(history: UsageHistory, tierOf: TierOf = fallbackTierOf): UsageStats {
   const dates = Object.keys(history.history).sort();
   if (dates.length === 0) {
     return { days: [], accounts: [], providers: [], dateRange: null };
@@ -85,10 +102,10 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
     const byTier: Record<SiteTier, number> = { public: 0, paid: 0 };
     for (const [key, entry] of Object.entries(day)) {
       balance += entry.quota;
-      byTier[tierOf(providerOfKey(key))] += entry.quota;
-      spend += Math.max(0, entry.used - entry.used0);
+      byTier[entry.tier ?? tierOf(providerOfKey(key))] += entry.quota;
+      spend += entrySpend(entry);
     }
-    // gain 先置 0：精确的逐日签到收益在下面用 computeDailyGains 回填
+    // gain 先置 0：精确的逐日入账在下面用 computeDailyGains 回填
     // （按天聚合时拿不到前一日的 quota，在这里算不出增量）
     return {
       date,
@@ -101,17 +118,26 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
   });
 
   // ── 按账号聚合 ──
-  const lastDay = history.history[dates[dates.length - 1]!]!;
-  const accountKeys = Object.keys(lastDay);
+  const latestByKey = new Map<string, UsageDayMap[string]>();
+  const providerTiers = new Map<string, SiteTier>();
+  for (const date of dates) {
+    for (const [key, entry] of Object.entries(history.history[date]!)) {
+      latestByKey.set(key, entry);
+      const provider = providerOfKey(key);
+      providerTiers.set(provider, entry.tier ?? tierOf(provider));
+    }
+  }
+  const accountKeys = [...latestByKey.keys()];
   const accountStats: AccountStat[] = [];
   const providerTotals = new Map<string, number>();
 
   for (const key of accountKeys) {
-    const [provider, ...rest] = key.split(":");
-    const name = rest.join(":");
+    const { provider, name } = parseUsageKey(key);
     let spend = 0;
     let gain = 0;
     let prevQuota: number | null = null;
+    let prevUsed: number | null = null;
+    let prevDate: string | null = null;
     const signedDays = new Set<string>();
     const spends: number[] = [];
 
@@ -119,19 +145,26 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
       const entry = history.history[date]![key];
       if (!entry) {
         prevQuota = null;
+        prevUsed = null;
+        prevDate = null;
         continue;
       }
-      if (prevQuota !== null && entry.quota > prevQuota) {
-        gain += entry.quota - prevQuota;
-        signedDays.add(date);
+      if (prevQuota !== null && prevUsed !== null && prevDate !== null && isConsecutiveDate(prevDate, date)) {
+        const credit = entry.quota - prevQuota + (entry.used - prevUsed);
+        if (credit > 0.005) {
+          gain += credit;
+          signedDays.add(date);
+        }
       }
       prevQuota = entry.quota;
-      const daySpend = Math.max(0, entry.used - entry.used0);
+      prevUsed = entry.used;
+      prevDate = date;
+      const daySpend = entrySpend(entry);
       spend += daySpend;
       spends.push(daySpend);
     }
 
-    const last = lastDay[key]!;
+    const last = latestByKey.get(key)!;
     const balance = round2(last.quota);
     const last7 = spends.slice(-7);
     const last30 = spends.slice(-30);
@@ -142,7 +175,7 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
       key,
       provider: provider!,
       name,
-      tier: tierOf(provider!),
+      tier: last.tier ?? tierOf(provider!),
       balance,
       spend: round2(spend),
       burnRate7: round2(burn7),
@@ -155,7 +188,7 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
     providerTotals.set(provider!, (providerTotals.get(provider!) ?? 0) + balance);
   }
 
-  // 签到收益回填到天数序列（按天聚合时拿不到前一日的 quota，这里单独算精确日增量）
+  // 入账回填到天数序列（按天聚合时拿不到前一日快照，这里单独计算）
   const gainsByDay = computeDailyGains(history.history, dates);
   for (const point of days) point.gain = gainsByDay.get(point.date) ?? 0;
 
@@ -163,22 +196,25 @@ export function computeUsageStats(history: UsageHistory, tierOf: TierOf = defaul
     days,
     accounts: accountStats.sort((a, b) => b.spend - a.spend),
     providers: [...providerTotals.entries()]
-      .map(([provider, balance]) => ({ provider, tier: tierOf(provider), balance: round2(balance) }))
+      .map(([provider, balance]) => ({ provider, tier: providerTiers.get(provider) ?? tierOf(provider), balance: round2(balance) }))
       .sort((a, b) => b.balance - a.balance),
     dateRange: [dates[0]!, dates[dates.length - 1]!],
   };
 }
 
-/** 逐日签到收益（精确值）：当天各账号 quota 相对前一日（断档则视为新基线，不计收益）的增量合计 */
+/** 逐日入账（近似值）：相邻快照的 Δquota + Δused 正增量合计；断档视为新基线 */
 export function computeDailyGains(history: Record<string, UsageDayMap>, dates: string[]): Map<string, number> {
   const gains = new Map<string, number>();
-  const prevQuotaByKey = new Map<string, number>();
+  const prevByKey = new Map<string, { quota: number; used: number; date: string }>();
   for (const date of dates) {
     let dayGain = 0;
     for (const [key, entry] of Object.entries(history[date]!)) {
-      const prev = prevQuotaByKey.get(key);
-      if (prev !== undefined && entry.quota > prev) dayGain += entry.quota - prev;
-      prevQuotaByKey.set(key, entry.quota);
+      const prev = prevByKey.get(key);
+      if (prev && isConsecutiveDate(prev.date, date)) {
+        const credit = entry.quota - prev.quota + (entry.used - prev.used);
+        if (credit > 0.005) dayGain += credit;
+      }
+      prevByKey.set(key, { quota: entry.quota, used: entry.used, date });
     }
     gains.set(date, round2(dayGain));
   }

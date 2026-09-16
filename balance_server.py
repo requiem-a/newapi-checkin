@@ -1050,7 +1050,12 @@ def load_newapi_sites() -> list[NewapiSite]:
 		except Exception as e:
 			print(f'[SITE] 初始化 newapi_sites.json 失败: {e}')
 			return [NewapiSite(**s) for s in NEWAPI_SEED_SITES]
-	return _read_json_models(NEWAPI_SITES_FILE, NewapiSite, 'SITE')
+	sites = _read_json_models(NEWAPI_SITES_FILE, NewapiSite, 'SITE')
+	# 兼容手工编辑/旧版本写入的裸域名，并统一合法 scheme 的大小写。
+	for site in sites:
+		if site.domain.strip():
+			site.domain = normalize_site_domain(site.domain)
+	return sites
 
 
 def save_newapi_sites(sites: list[NewapiSite]):
@@ -1066,13 +1071,43 @@ def get_newapi_site(site_id: str) -> NewapiSite | None:
 	return None
 
 
+def normalize_site_domain(domain: str) -> str:
+	"""规范化站点根地址，保留显式 http/https 并兼容裸域名。
+
+	仅把合法的 http(s) scheme 视为 scheme；判断不区分大小写，避免把
+	``HTTP://host`` 拼成 ``https://HTTP://host``。路径前缀保留，供自托管
+	站点使用非根路径部署。
+	"""
+	value = (domain or '').strip()
+	if not value:
+		raise ValueError('域名不能为空')
+	scheme_match = re.match(r'^([a-z][a-z0-9+.-]*)://', value, re.IGNORECASE)
+	if scheme_match:
+		scheme = scheme_match.group(1).lower()
+		if scheme not in ('http', 'https'):
+			raise ValueError('站点地址只支持 http:// 或 https://')
+		normalized = f'{scheme}://{value[scheme_match.end():]}'
+	else:
+		normalized = f'https://{value}'
+	if not urlparse(normalized).hostname:
+		raise ValueError(f'站点地址无效：{domain}')
+	return normalized.rstrip('/')
+
+
 def load_newapi_accounts(site: NewapiSite) -> list[NewapiAccountItem]:
 	"""从站点自己的 accounts_file 加载账号列表"""
 	return _read_json_models(site.accounts_path(), NewapiAccountItem, site.id.upper())
 
 
+def _validate_newapi_accounts(accounts: list[NewapiAccountItem]) -> None:
+	names = [account.name for account in accounts]
+	if len(set(names)) != len(names):
+		raise ValueError('同一站点内账号 name 不能重复，请使用唯一名称')
+
+
 def save_newapi_accounts(site: NewapiSite, accounts: list[NewapiAccountItem]):
 	"""保存账号列表到站点自己的 accounts_file"""
+	_validate_newapi_accounts(accounts)
 	_atomic_write_json(site.accounts_path(), [a.model_dump() for a in accounts], indent=2)
 
 
@@ -1112,8 +1147,8 @@ async def newapi_request(site: NewapiSite, method: str, path: str, headers: dict
 async def _proxied_newapi_request(site: NewapiSite, method: str, path: str, headers: dict, json_body=None):
 	"""经本地 mihomo 出口向站点发一次性请求（不复用 Session 池）。
 
-	newapi_request 是直连的（这类站点平时不需要代理）；只有撞「按出口 IP 限流」的端点
-	（取全量 key 的 batch/keys，20 次/20 分钟/IP）才借 mihomo 换出口。这里每次都新建连接，
+	普通 newapi_request 遵循站点 use_proxy 配置；只有撞「按出口 IP 限流」的端点
+	（取全量 key 的 batch/keys，20 次/20 分钟/IP）才用本函数配合 mihomo 换出口。这里每次都新建连接，
 	不存在 keep-alive 隧道钉死旧出口的问题（agentrouter 轮换踩过的坑）。
 	"""
 	from curl_cffi import requests as cffi_requests
@@ -1169,7 +1204,7 @@ async def newapi_turnstile_status(site: NewapiSite) -> dict:
 	sitekey 一律从这里读，不要硬编码：它有域名限制，各站点各不相同。
 	探测失败时保守假定 enabled=True（宁可提示用户手动签，也别让自动签到静默失败）。
 	"""
-	cache_key = f'turnstile:{site.id}'
+	cache_key = f'turnstile:{site.id}:{site.domain}:{"proxy" if site.use_proxy else "direct"}'
 	cached = waf_cache.get(cache_key)
 	if cached and cached['expires'] > time.time():
 		return cached['value']
@@ -1718,7 +1753,7 @@ async def run_newapi_checkin(site: NewapiSite, trigger: str = 'manual'):
 
 	ts_state = await newapi_turnstile_status(site)
 	if ts_state['enabled']:
-		ts_msg = '站点已开启 Turnstile 人机校验，服务器端无法签到，请在 Web UI 用浏览器脚本签到'
+		ts_msg = '站点已开启 Turnstile 人机校验，服务器端无法签到，请在 Web UI 完成浏览器验证'
 		now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 		for name in st['accounts']:
 			st['accounts'][name] = {'status': 'failed', 'message': ts_msg, 'time': now_str}
@@ -1739,7 +1774,7 @@ async def run_newapi_checkin(site: NewapiSite, trigger: str = 'manual'):
 				st['accounts'][acc.name] = {'status': status, 'message': result.get('message', '签到成功'), 'time': ts}
 				bal = await query_balance_newapi(site, acc)
 				if bal.get('success'):
-					record_account_usage(site.id, acc.name, bal['used'], bal['quota'])
+					record_account_usage(site.id, acc.name, bal['used'], bal['quota'], site.tier)
 			else:
 				st['accounts'][acc.name] = {'status': 'failed', 'message': result.get('message', '签到失败'), 'time': ts}
 			add_newapi_checkin_log(site, f'{acc.name}: {st["accounts"][acc.name]["message"]}')
@@ -3056,9 +3091,7 @@ async def save_sites(req: dict):
 		for s in validated:
 			if not s.id.replace('_', '').replace('-', '').isalnum():
 				return {'success': False, 'error': f'站点 id 只能用字母数字与 -_：{s.id}'}
-			if not s.domain.startswith('http'):
-				s.domain = f'https://{s.domain}'
-			s.domain = s.domain.rstrip('/')
+			s.domain = normalize_site_domain(s.domain)
 		save_newapi_sites(validated)
 		return {'success': True, 'sites': [s.model_dump() for s in validated]}
 	except Exception as e:
@@ -3072,9 +3105,10 @@ async def probe_site(req: dict):
 	读 `GET /api/status`：能返回 `data.version` 就是 new-api，顺带把站点名、签到是否开启、
 	Turnstile 状态、quota 换算单位一并回给前端做默认值。此接口不写任何文件。
 	"""
-	domain = (req.get('domain') or '').strip().rstrip('/')
-	if not domain.startswith('http'):
-		domain = f'https://{domain}'
+	try:
+		domain = normalize_site_domain(req.get('domain') or '')
+	except ValueError as e:
+		return {'success': False, 'error': str(e)}
 	probe = NewapiSite(id='__probe__', label='probe', domain=domain)
 	try:
 		resp = await newapi_request(probe, 'GET', probe.status_path, {'User-Agent': USER_AGENT})
@@ -3132,6 +3166,10 @@ async def query_site(site_id: str):
 	accounts = load_newapi_accounts(site)
 	if not accounts:
 		return {'success': False, 'error': f'没有 {site.label} 账号'}
+	try:
+		_validate_newapi_accounts(accounts)
+	except ValueError as e:
+		return {'success': False, 'error': str(e)}
 
 	sem = asyncio.Semaphore(site.concurrency or NEWAPI_CONCURRENCY)
 
@@ -3165,6 +3203,10 @@ async def site_checkin_start(site_id: str):
 	accounts = load_newapi_accounts(site)
 	if not accounts:
 		return {'success': False, 'error': f'没有 {site.label} 账号可签到'}
+	try:
+		_validate_newapi_accounts(accounts)
+	except ValueError as e:
+		return {'success': False, 'error': str(e)}
 	start_newapi_checkin(site, trigger='manual')
 	await asyncio.sleep(0.2)
 	return {
@@ -3178,7 +3220,7 @@ async def site_checkin_start(site_id: str):
 async def site_turnstile(site_id: str):
 	"""返回某站点当前的 Turnstile 状态，供前端决定签到走哪条路。
 
-	enabled=True  → 服务器端签不了，前端展示浏览器脚本 + 同步流程
+	enabled=True  → 服务器端签不了，前端展示内嵌浏览器验证，并可回退脚本 + 同步流程
 	enabled=False → 站长关掉了校验，前端直接走 /checkin/start 一键签到
 	"""
 	site, err = _site_or_error(site_id)
@@ -3213,6 +3255,10 @@ async def site_checkin_sync(site_id: str):
 	accounts = load_newapi_accounts(site)
 	if not accounts:
 		return {'success': False, 'error': f'没有 {site.label} 账号'}
+	try:
+		_validate_newapi_accounts(accounts)
+	except ValueError as e:
+		return {'success': False, 'error': str(e)}
 
 	sem = asyncio.Semaphore(site.concurrency or NEWAPI_CONCURRENCY)
 	results: dict = {}
@@ -3222,13 +3268,14 @@ async def site_checkin_sync(site_id: str):
 			info = await newapi_checkin_info(site, acc)
 			bal = await query_balance_newapi(site, acc)
 		if bal.get('success'):
-			record_account_usage(site.id, acc.name, bal['used'], bal['quota'])
+			record_account_usage(site.id, acc.name, bal['used'], bal['quota'], site.tier)
 		if not info.get('success'):
-			results[acc.name] = {'name': acc.name, 'success': False, 'message': info.get('error', '状态查询失败')}
+			results[acc.name] = {'name': acc.name, 'user_id': acc.user_id, 'success': False, 'message': info.get('error', '状态查询失败')}
 			return
 		checked = bool(info.get('checked_in_today'))
 		results[acc.name] = {
 			'name': acc.name,
+			'user_id': acc.user_id,
 			'success': checked,
 			'message': '今日已签到' if checked else '今日未签到',
 			'already_signed': checked,
@@ -4063,6 +4110,9 @@ def migrate_usage_keys(usage_data: dict) -> tuple[dict, int, int]:
 	实在找不到归属的账号（已删除的账号）原样保留，不丢数据也不乱认。
 	"""
 	owners = _usage_providers_by_name()
+	known_providers = {'anyrouter', 'agentrouter'}
+	for candidates in owners.values():
+		known_providers.update(candidates)
 	migrated = 0
 	orphaned = 0
 	out: dict = {}
@@ -4072,7 +4122,8 @@ def migrate_usage_keys(usage_data: dict) -> tuple[dict, int, int]:
 			continue
 		new_day: dict = {}
 		for key, value in day.items():
-			if ':' in key:  # 已经是新格式
+			prefix = key.split(':', 1)[0]
+			if ':' in key and prefix in known_providers:  # 已经是新格式
 				new_day[key] = value
 				continue
 			candidates = owners.get(key)
@@ -4101,7 +4152,7 @@ def run_usage_key_migration():
 	print(f'[USAGE] 用量 key 已迁移为「站点:账号名」：改写 {migrated} 条，无法归属 {orphaned} 条保持原样')
 
 
-def _merge_usage_entry(day: dict, key: str, used: float, quota: float):
+def _merge_usage_entry(day: dict, key: str, used: float, quota: float, tier: Literal['public', 'paid'] | None = None):
 	"""把一个账号的余额并入某天的快照条目。key 是 `usage_key()` 生成的「站点:账号名」。
 
 	`used`/`quota` 始终是最新值（AgentRouter 的余额展示靠它）；`used0` 是当天第一次记录到的
@@ -4114,15 +4165,22 @@ def _merge_usage_entry(day: dict, key: str, used: float, quota: float):
 		'used': used,
 		'quota': quota,
 		'used0': prev.get('used0', prev.get('used', used)),
+		'tier': tier or prev.get('tier') or 'public',
 	}
 
 
-def record_account_usage(provider: str, name: str, used: float, quota: float):
+def record_account_usage(
+	provider: str,
+	name: str,
+	used: float,
+	quota: float,
+	tier: Literal['public', 'paid'] | None = None,
+):
 	"""把单个账号的余额写入今日用量快照（Login / 站点账号在签到时增量记录）"""
 	today = datetime.now().strftime('%Y-%m-%d')
 	usage_data = load_usage_data()
 	day = usage_data.get(today, {})
-	_merge_usage_entry(day, usage_key(provider, name), used, quota)
+	_merge_usage_entry(day, usage_key(provider, name), used, quota, tier)
 	usage_data[today] = day
 	# 只保留最近 90 天
 	sorted_dates = sorted(usage_data.keys(), reverse=True)[:90]
@@ -4157,7 +4215,7 @@ async def take_daily_snapshot():
 
 				tasks = [limited_query_old(acc) for acc in accounts]
 				results = await asyncio.gather(*tasks)
-				all_results.extend(('anyrouter', r) for r in results)
+				all_results.extend(('anyrouter', r, 'public') for r in results)
 				print(f'[USAGE] 旧格式账号查询完成: {len(results)} 个')
 		except Exception as e:
 			print(f'[USAGE] 读取旧格式配置失败: {e}')
@@ -4172,14 +4230,14 @@ async def take_daily_snapshot():
 
 		tasks = [limited_query_token(acc) for acc in token_accounts]
 		results = await asyncio.gather(*tasks)
-		all_results.extend(('anyrouter', r) for r in results)
+		all_results.extend(('anyrouter', r, 'public') for r in results)
 		print(f'[USAGE] 新格式账号查询完成: {len(results)} 个')
 
 	# 注：Login（agentrouter.org）账号的余额不在此处查询。
 	# 登录接口按 IP 限流，且每日 0 点会启动签到流程，余额在每个账号签到成功时
 	# 由 record_account_usage() 增量写入今日快照，避免重复请求登录接口。
 
-	# 3. 通用 new-api 站点账号（不走 WAF/代理，各站点独立并发查询）
+	# 3. 通用 new-api 站点账号（按站点 use_proxy 配置出口，各站点独立并发查询）
 	for site in load_newapi_sites():
 		site_accounts = load_newapi_accounts(site)
 		if not site_accounts:
@@ -4191,7 +4249,7 @@ async def take_daily_snapshot():
 				return await query_balance_newapi(s, acc)
 
 		results = await asyncio.gather(*[limited_query_site(acc) for acc in site_accounts])
-		all_results.extend((site.id, r) for r in results)
+		all_results.extend((site.id, r, site.tier) for r in results)
 		print(f'[USAGE] {site.label} 账号查询完成: {len(results)} 个')
 
 	if not all_results:
@@ -4200,14 +4258,14 @@ async def take_daily_snapshot():
 
 	# 保存快照。key 必须带站点前缀，否则跨站重名的账号会互相覆盖
 	# （anyrouter 的 cookie 账号与 gorouter 就撞了 `0`/`16`）。
-	snapshot = {usage_key(provider, r['name']): r for provider, r in all_results if r.get('success')}
+	snapshot = {usage_key(provider, r['name']): (r, tier) for provider, r, tier in all_results if r.get('success')}
 
 	if snapshot:
 		usage_data = load_usage_data()
 		# 合并而非覆盖：保留 Login 账号在签到时已增量写入的余额与当天已定下的基线
 		day = usage_data.get(today, {})
-		for key, r in snapshot.items():
-			_merge_usage_entry(day, key, r['used'], r['quota'])
+		for key, (r, tier) in snapshot.items():
+			_merge_usage_entry(day, key, r['used'], r['quota'], tier)
 		usage_data[today] = day
 		# 只保留最近 90 天
 		sorted_dates = sorted(usage_data.keys(), reverse=True)[:90]
@@ -4348,9 +4406,9 @@ async def get_today_usage():
 
 @app.get('/api/usage/history')
 async def get_usage_history():
-	"""获取历史用量数据（最近 30 天）"""
+	"""获取历史用量数据（最近 90 天）"""
 	usage_data = load_usage_data()
-	sorted_dates = sorted(usage_data.keys(), reverse=True)[:30]
+	sorted_dates = sorted(usage_data.keys(), reverse=True)[:90]
 	history = {d: usage_data[d] for d in sorted_dates}
 	return {
 		'success': True,

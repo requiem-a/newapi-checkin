@@ -82,11 +82,16 @@ export function SitesPage() {
       toast.error(`站点 ID「${newId.trim()}」已存在`);
       return;
     }
+    const domain = newDomain.trim();
+    if (/^http:\/\//i.test(domain)) {
+      const proceed = window.confirm("你输入的是 http:// 站点。内嵌签到会通过明文 HTTP 发送账号访问密钥，存在被窃听风险。仍要添加吗？");
+      if (!proceed) return;
+    }
     setAdding(true);
     try {
       // 原样提交用户输入：后端对不带 scheme 的裸域名补 https://，
       // 这里若先把 scheme 剥掉，会把用户显式写的 http:// 也强行变成 https://
-      const input = { id: newId.trim(), label: newLabel.trim(), domain: newDomain.trim(), tier: newTier };
+      const input = { id: newId.trim(), label: newLabel.trim(), domain, tier: newTier };
       await apiPost<SitesResponse>("/sites", { sites: [...sites, input] });
       await queryClient.invalidateQueries({ queryKey: ["accounts"] });
       toast.success(`已接入 ${input.label}（${TIER_SITE_LABEL[newTier]}），去「账号管理」添加它的账号`);
@@ -195,7 +200,7 @@ export function SitesPage() {
             <p className="mt-1 text-muted-foreground">
               签到功能：{probeResult.checkin_enabled ? <span className="text-checkin-done">已开启</span> : "未开启"}
               {" · "}
-              Turnstile 校验：{probeResult.turnstile_check ? <span className="text-checkin-pending">需要（走浏览器脚本签到）</span> : "不需要（可服务器端签到）"}
+              Turnstile 校验：{probeResult.turnstile_check ? <span className="text-checkin-pending">需要（走浏览器验证签到）</span> : "不需要（可服务器端签到）"}
               {` · 1 美元 = ${probeResult.quota_per_unit} 配额`}
             </p>
           </div>
@@ -298,7 +303,7 @@ function SiteCard({
         <Badge variant="secondary" className="text-[11px]">{count} 个账号</Badge>
         {turnstile ? (
           turnstile.enabled ? (
-            <Badge variant="secondary" className="text-[11px] text-checkin-pending">Turnstile · 浏览器脚本</Badge>
+            <Badge variant="secondary" className="text-[11px] text-checkin-pending">Turnstile · 浏览器验证</Badge>
           ) : (
             <Badge variant="secondary" className="text-[11px] text-checkin-done">
               <ShieldCheck className="mr-1 size-3" aria-hidden="true" />

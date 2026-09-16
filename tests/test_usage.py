@@ -80,6 +80,12 @@ def test_基线只认当天第一次写入(usage_file):
 	assert e['used'] == 12.4, 'used 要跟着更新，否则余额显示是旧的'
 
 
+def test_快照保存写入时的站点分区():
+	day = {}
+	bs._merge_usage_entry(day, 'paid-site:a', used=1.0, quota=9.0, tier='paid')
+	assert day['paid-site:a']['tier'] == 'paid', '历史分区必须随快照保存，不能用当前站点配置追溯重分类'
+
+
 # ===== 旧数据迁移 =====
 
 
@@ -91,6 +97,7 @@ def owners(monkeypatch):
 	monkeypatch.setattr(bs, 'load_newapi_accounts', lambda s: [
 		bs.NewapiAccountItem(name='5', access_token='T', user_id='1'),
 		bs.NewapiAccountItem(name='6', access_token='T', user_id='2'),
+		bs.NewapiAccountItem(name='colon:name', access_token='T', user_id='3'),
 	])
 	monkeypatch.setattr(bs, 'load_token_accounts', lambda: [])
 	monkeypatch.setattr(bs, 'load_cookie_accounts', lambda: [bs.AccountItem(name='a1', cookies={}, api_user='9')])
@@ -114,6 +121,13 @@ def test_重名的按优先级归给站点(owners):
 	assert 'gorouter:5' in out['2026-08-17'], '站点的值由 0 点快照每天写入，比 agentrouter 的可信'
 	assert 'agentrouter:5' not in out['2026-08-17'], 'AgentRouter 的历史从迁移当天重新开始'
 	assert '5' not in out['2026-08-17'], '裸 key 必须清掉，否则两边还会都读到它'
+
+
+def test_旧账号名含冒号仍会迁移(owners):
+	data = {'2026-08-17': {'colon:name': {'used': 1, 'quota': 2, 'used0': 1}}}
+	out, migrated, orphaned = bs.migrate_usage_keys(data)
+	assert 'gorouter:colon:name' in out['2026-08-17']
+	assert (migrated, orphaned) == (1, 0)
 
 
 def test_认不出归属的条目原样保留(owners):
@@ -151,6 +165,14 @@ def test_今日基线按新key返回(usage_file, monkeypatch):
 	r = asyncio.run(bs.get_today_usage())
 	assert r['baseline']['gorouter:5'] == 170.18
 	assert r['baseline']['agentrouter:5'] == 0.0
+
+
+def test_历史接口返回90天(usage_file, monkeypatch):
+	data = {f'2026-08-{day:02d}': {} for day in range(1, 31)}
+	data.update({f'2026-09-{day:02d}': {} for day in range(1, 11)})
+	monkeypatch.setattr(bs, 'load_usage_data', lambda: data)
+	out = asyncio.run(bs.get_usage_history())
+	assert len(out['history']) == 40
 
 
 # ===== AgentRouter 余额来源 =====

@@ -94,7 +94,7 @@
 ### 用量统计
 
 | GET `/api/usage/today` | 4284 | 今日用量基线 | — | `{success,date,baseline{"provider:name":used0}}` | ✅ |
-| GET `/api/usage/history` | 4315 | **近 30 天历史** | — | `{success,history}` | ⛔ **统计面板的现成数据源** |
+| GET `/api/usage/history` | 4315 | **近 90 天历史** | — | `{success,history}` | ✅ |
 | POST `/api/usage/snapshot` | 4327 | 手动触发快照 | — | `{success,message}` | ⛔ |
 
 ---
@@ -200,7 +200,7 @@ login 按 username；站点账号按 `site_id:user_id`。
 | 1 | **无登出功能** | `/api/logout` 端点存在，前端从未调用，UI 无入口 |
 | 2 | **token 模式 AnyRouter 账号签不了到** | `/api/token/checkin` 存在但无按钮触发；`anyrouterCheckin()` 只处理 cookie 账号；自动签到调度器同样只签 cookie 账号。这类账号**手动自动都签不了，只能查余额** |
 | 3 | **筛选框形同虚设** | `#checkinFilter` 切 all/checked/unchecked 只触发重渲染，但 `hasCheckedIn(r)`(`:1877`) **硬编码返回 `null`**（注释写明「暂无法通过 stat API 判断是否已签到」），UI 在但功能未接通 |
-| 4 | **`/api/usage/history` 从未被调用** | 后端已提供近 30 天历史，前端完全没用——**统计面板的现成数据源** |
+| 4 | **`/api/usage/history` 已接入** | 用量页与总览使用近 90 天历史 |
 | 5 | `/api/monitor/status` 响应结构不一致 | 唯一不带 `{success:...}` 外层包装的端点 |
 | 6 | `keyManagerModal` 不响应 ESC | `:3707` 只监听 monitorModal / siteManagerModal |
 | 7 | `/api/anyrouter/cookie-status` 未使用 | 前端本地解码算剩余天数，两边逻辑理论等价但无一致性测试 |

@@ -229,7 +229,7 @@ export function DashboardPage() {
                   const level = healthLevel(a);
                   const lastDay = stats.days[stats.days.length - 1];
                   const dayEntry = lastDay ? historyQ.data?.history[lastDay.date]?.[a.key] : undefined;
-                  const todayUsed = dayEntry ? dayEntry.used - dayEntry.used0 : null;
+                  const todayUsed = dayEntry ? dayEntry.used - (dayEntry.used0 ?? dayEntry.used) : null;
                   return (
                     <TableRow key={a.key} className="animate-in fade-in slide-in-from-bottom-1 fill-mode-both duration-300" style={{ animationDelay: `${Math.min(i, 10) * 30}ms` }}>
                       <TableCell>

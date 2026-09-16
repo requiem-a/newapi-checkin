@@ -314,6 +314,8 @@ export interface SiteCheckinInfoResponse {
 /** POST /api/site/{id}/checkin/sync —— 浏览器脚本跑完后核对真实签到状态 */
 export interface SiteSyncResult {
   name: string;
+  /** 稳定账号身份；name 只是展示字段，允许旧响应缺省以兼容已有服务端。 */
+  user_id?: string;
   /**
    * true = 核对到「今日已签到」。false 有两种可能：今日确实未签到，或状态查询本身失败——
    * 用 `total_checkins` 是否存在来区分（查询失败时不会有这个字段）。
@@ -535,7 +537,10 @@ export interface UsageEntry {
   /** 当前总额度（美元） */
   quota: number;
   /** 当天第一次记录到的已用量，即今日用量的基线，写入后当天不再变动 */
-  used0: number;
+  /** 老快照可能缺失该字段；前端应回退到 used。 */
+  used0?: number;
+  /** 快照写入时的站点分区；老快照缺失时回退到当前站点配置。 */
+  tier?: SiteTier;
 }
 
 /** 一天的用量快照：key 是 `usage_key(provider, name)` 拼出的 "provider:账号名" */
@@ -548,7 +553,7 @@ export interface UsageBaseline {
   baseline: Record<string, number>;
 }
 
-/** GET /api/usage/history —— 最近 30 天，key 是 YYYY-MM-DD */
+/** GET /api/usage/history —— 最近 90 天，key 是 YYYY-MM-DD */
 export interface UsageHistory {
   history: Record<string, UsageDayMap>;
 }
